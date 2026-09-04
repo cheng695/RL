@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+cmake-build*/
+*.so
+
+# Isaac Sim / Omniverse
+*.dmp
+.thumbs/
+_isaac_sim*
+_repo/
+_build/
+.lastformat
+
+# USD assets are usually large generated/binary artifacts.
+*.usd
+*.usda
+*.usdc
+*.usdz
+
+# Training outputs
+logs/
+runs/
+outputs/
+output/
+videos/
+recordings/
+wandb/
+.neptune/
+*.pt
+*.pth
+*.onnx
+*.jit
+
+# Local environment
+.env
+.venv/
+venv/
+env/
+*.tmp
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,113 @@
+{
+  "task": "WheelLeg-v0",
+  "samples": 2048,
+  "joint_names": [
+    "Left_front_joint",
+    "Left_rear_joint",
+    "Right_front_joint",
+    "Right_rear_joint"
+  ],
+  "body_names": [
+    "base_link",
+    "Left_Wheel_link",
+    "Right_Wheel_link"
+  ],
+  "left_hip_offset_b": [
+    -0.0193914,
+    -0.1717,
+    -0.05
+  ],
+  "right_hip_offset_b": [
+    -0.0193914,
+    0.1707,
+    -0.05
+  ],
+  "best": {
+    "signs": [
+      1.0,
+      1.0,
+      -1.0,
+      -1.0
+    ],
+    "joint_order_indices": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "joint_order_names": [
+      "Left_front_joint",
+      "Left_rear_joint",
+      "Right_front_joint",
+      "Right_rear_joint"
+    ],
+    "loss": 0.0066484189592301846,
+    "rmse_total_m": 0.08153783529996872,
+    "rmse_left_x_m": 0.09037228673696518,
+    "rmse_left_y_down_m": 0.06962370872497559,
+    "rmse_right_x_m": 0.08801458775997162,
+    "rmse_right_y_down_m": 0.07637079060077667,
+    "offset_m": -0.08757821470499039,
+    "l1_m": 0.07384177297353745,
+    "l2_m": 0.14523276686668396,
+    "q0_rad": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "length_range_m": [
+      0.08142612129449844,
+      0.2149755358695984
+    ],
+    "theta_range_rad": [
+      -1.943731427192688,
+      1.0814791917800903
+    ]
+  },
+  "top_results": [
+    {
+      "signs": [
+        1.0,
+        1.0,
+        -1.0,
+        -1.0
+      ],
+      "joint_order_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "joint_order_names": [
+        "Left_front_joint",
+        "Left_rear_joint",
+        "Right_front_joint",
+        "Right_rear_joint"
+      ],
+      "loss": 0.0066484189592301846,
+      "rmse_total_m": 0.08153783529996872,
+      "rmse_left_x_m": 0.09037228673696518,
+      "rmse_left_y_down_m": 0.06962370872497559,
+      "rmse_right_x_m": 0.08801458775997162,
+      "rmse_right_y_down_m": 0.07637079060077667,
+      "offset_m": -0.08757821470499039,
+      "l1_m": 0.07384177297353745,
+      "l2_m": 0.14523276686668396,
+      "q0_rad": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "length_range_m": [
+        0.08142612129449844,
+        0.2149755358695984
+      ],
+      "theta_range_rad": [
+        -1.943731427192688,
+        1.0814791917800903
+      ]
+    }
+  ]
+}

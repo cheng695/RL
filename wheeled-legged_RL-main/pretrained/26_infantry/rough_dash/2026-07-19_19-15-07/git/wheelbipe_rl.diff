@@ -1,0 +1,2175 @@
+--- git status ---
+On branch important_merge
+Your branch is ahead of 'origin/important_merge' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	new file:   our-v14-slope-rough-reward.md
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py
+	modified:   source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py
+	modified:   source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_mood_multitask.py
+	modified:   source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py
+ 
+
+
+--- git diff ---
+diff --git a/our-v14-slope-rough-reward.md b/our-v14-slope-rough-reward.md
+new file mode 100644
+index 0000000..7370182
+--- /dev/null
++++ b/our-v14-slope-rough-reward.md
+@@ -0,0 +1,1053 @@
++# V14 Slope-Rough Reward 完整说明
++
++更新时间：2026-07-18
++
++本文档说明当前工作区中 V14 `Slope-Rough` 任务的完整 reward 运行逻辑，包括：
++
++- 非 STAIR 状态使用的主 reward 表；
++- 每个 active reward 的 raw 计算公式、门控条件和系数；
++- 权重为零、没有 raw 实现或已被注释的条目；
++- AIR、LANDING、high-spin command profile 对 reward 的动态处理；
++- 真实 `mt_main_state == STAIR` 时切换的第二张 reward 表；
++- TensorBoard `Episode/Reward/*` 的实际含义和调参时的量级判断。
++
++本文以当前源码为准，不代表历史 checkpoint 保存时的 reward。分析旧训练结果时，应优先查看对应 run 目录中的 `params/env.yaml`，因为旧 checkpoint 可能来自不同的 reward scale、phase gate 或源码版本。
++
++## 1. 适用任务与继承路径
++
++基础配置为：
++
++```text
++WheelbipeV14SlopeRoughEnvCfg
++└─ WheelbipeV14SlopeRoughFlagObsEnvCfg
++   └─ WheelbipeV14SlopeRoughFlagObsSlimPrivEnvCfg
++      └─ WheelbipeV14SlopeRoughFlagObsSlimPrivNormalOnlyEnvCfg
++```
++
++因此 `FlagObs`、`SlimPriv`、`NormalOnly`、ResidualGRU、RMA 和 500Hz-PD 等派生入口，只要没有显式重写 reward 表，都继承本文说明的 reward。`NormalOnly` 只固定 policy 的 task flag，不会把 reward 切换成另一套 normal reward。
++
++主要 Gym task 包括：
++
++- `Robotics-Wheelbipe-V14-Slope-Rough-v0`
++- `Robotics-Wheelbipe-V14-Slope-Rough-FlagObs-v0`
++- `Robotics-Wheelbipe-V14-Slope-Rough-FlagObs-SlimPriv-v0`
++- `Robotics-Wheelbipe-V14-Slope-Rough-FlagObs-SlimPriv-NormalOnly-v0`
++- 对应的 `Play-v0` 和 `500HzPD-50Hz` 派生入口
++
++关键源码：
++
++- reward 表：`source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py`
++- raw reward：`source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py::_get_rewards()`
++- high-spin reward 替换：`source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env.py`
++- AIR/LANDING 状态与门控：`source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py`
++- MT rough 状态 reward scale：`source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py`
++
++## 2. Reward 计算总流程
++
++当前普通 Slope-Rough 为 `200Hz PD / 50Hz policy`：
++
++```text
++sim.dt = 0.005s
++decimation = 4
++policy step_dt = 0.02s
++```
++
++500Hz-PD 版本为 `sim.dt=0.002s, decimation=10`，policy step 同样为 `0.02s`。因此两类任务的 reward 时间积分尺度一致。
++
++每个 reward 条目的最终单步贡献为：
++
++\[
++R_{i,t}=w_i\,r_{i,t}\,\Delta t
++\]
++
++其中：
++
++- \(r_{i,t}\)：源码计算出的 raw reward；
++- \(w_i\)：当前状态所选 reward 表中的系数；
++- \(\Delta t=0.02s\)。
++
++完整执行顺序为：
++
++```text
++仿真状态、command、接触、最终 applied_torque
++                    ↓
++          计算全部 rew_* raw term
++                    ↓
++       velocity / height reward gate
++                    ↓
++ V14 high-spin / per-terrain raw term 处理
++                    ↓
++ MT state-machine / recover / reset-zero-torque scale
++                    ↓
++               × step_dt
++                    ↓
++ 非 STAIR表 / STAIR表按 runtime state 选择系数
++                    ↓
++           NaN/Inf 防护、日志和求和
++```
++
++TensorBoard 的 `Episode/Reward/<term>` 是该条目经过上述处理后的 episode 累加值，不是 raw reward，也不是配置文件中系数本身。
++
++## 3. 符号约定
++
++| 符号 | 含义 |
++| --- | --- |
++| \(\dot q,\ddot q\) | 关节角速度、角加速度 |
++| \(\tau\) | 最终写入仿真的 `robot.data.applied_torque` |
++| \(v_x^b,v_y^b,v_z^b\) | 机体系 root 线速度 |
++| \(\omega_x^b,\omega_y^b,\omega_z^b\) | 机体系 root 角速度 |
++| \(g_x,g_y\) | `projected_gravity_b` 的水平分量 |
++| \(x_L,x_R\) | 左右轮中心在机体系中的 x 坐标 |
++| \(h,h^*\) | reward 使用的高度参考值和目标值 |
++| \(c_x,c_z\) | 当前 reward command 的前向速度和 yaw 角速度目标 |
++| \(\Delta t\) | policy step，当前为 `0.02s` |
++
++## 4. 当前非 STAIR reward 表总览
++
++`NORMAL`、`SLOPE`、`AIR`、`LANDING` 以及不处于真实 STAIR 主状态的环境，使用 `_make_v14_slope_rough_rewards()`。
++
++### 4.1 当前非零条目
++
++| Reward | 系数 | 类型 | 主要目的 |
++| --- | ---: | --- | --- |
++| `landing_wheel_body_x_positive` | `+10.0` | Landing 奖励 | 触地时两轮位于机体前方 |
++| `jump_landing_single_wheel_contact_delay` | `-20.0` | Landing 惩罚 | 限制两轮首次触地时间差 |
++| `landing_wheel_max_contact_force` | `-20.0` | Landing 惩罚 | 限制轮子落地冲击力 |
++| `termination` | `-200.0` | 事件惩罚 | 惩罚非 timeout termination |
++| `leg_joint_acc` | `-5e-7` | 正则 | 限制四个主动腿关节加速度 |
++| `leg_joint_vel` | `-5e-3` | 正则 | 限制四个主动腿关节速度 |
++| `joint_torque` | `-1e-4` | 正则 | 限制六个主动关节最终力矩 |
++| `wheel_acc` | `-1e-9` | 正则 | 限制两轮角加速度 |
++| `wheel_vel` | `-1e-8` | 正则 | 限制两轮角速度 |
++| `wheel_power` | `-1e-5` | 能耗 | 限制轮子正机械功率 |
++| `lin_vel_z` | `-0.5` | 稳定性 | 限制机体竖直速度 |
++| `ang_vel_xy` | `-0.1` | 稳定性 | 限制 roll/pitch 角速度 |
++| `torque_smoothness_leg` | `-1e-5` | 正则 | 限制腿力矩二阶差分 |
++| `torque_rate` | `-1e-5` | 正则 | 限制六关节力矩一阶差分 |
++| `torque_smoothness_wheel` | `-1e-4` | 正则 | 限制轮力矩二阶差分 |
++| `flat_orientation_y_v` | `-2.0` | 姿态惩罚 | 速度相关的 \(g_x\) 倾斜惩罚 |
++| `flat_orientation_y_exp` | `+1.0` | 姿态奖励 | 指数奖励 \(g_x\) 接近零 |
++| `flat_orientation_x_v` | `-2.0` | 姿态惩罚 | 速度相关的 \(g_y\) 倾斜惩罚 |
++| `flat_orientation_x_exp` | `+1.0` | 姿态奖励 | 指数奖励 \(g_y\) 接近零 |
++| `track_lin_vel_xy` | `+1.0` | 跟踪奖励 | 跟踪水平前向速度 |
++| `track_lin_vel_xy_square` | `-1.0` | 跟踪惩罚 | 平方惩罚前向速度误差 |
++| `track_ang_vel_z` | `+0.5` | 跟踪奖励 | 跟踪 yaw 角速度 |
++| `track_ang_vel_z_square` | `-1.0` | 跟踪惩罚 | 平方惩罚 yaw 误差 |
++| `track_height_exp_tight` | `+1.0` | 高度奖励 | 严格指数高度跟踪 |
++| `track_height_square` | `-1.0` | 高度惩罚 | 平方高度误差 |
++| `no_fork` | `-1.0` | 几何惩罚 | 限制左右轮前后错位超过阈值 |
++| `no_fork_square` | `-1.0` | 几何惩罚 | 连续惩罚左右轮前后错位 |
++| `undesired_contact` | `-2.0` | 接触惩罚 | 惩罚机体和腿部非轮接触 |
++| `stand_still_lin_vel` | `-2.0` | 静止惩罚 | 小目标速度时限制机体平移 |
++
++### 4.2 当前系数为零的条目
++
++这些 key 仍位于 reward 表中，但当前不影响总 reward：
++
++| Reward | 系数 | raw 是否存在 | 说明 |
++| --- | ---: | --- | --- |
++| `airborne_xy_displacement` | `0.0` | 是 | Landing event 时计算 AIR→LANDING XY 位移，但当前关闭 |
++| `leg_joint_pair_pos_diff` | `-0.0` | 否 | 当前没有对应 `rew_leg_joint_pair_pos_diff`，即使改非零也不会生效 |
++| `wheel_air_spin` | `0.0` | 是 | 计算无接触轮的轮速平方，但当前关闭 |
++| `flat_orientation_y` | `-0.0` | 是 | 简单 \(g_x^2\) 姿态项关闭 |
++| `flat_orientation_x` | `-0.0` | 是 | 简单 \(g_y^2\) 姿态项关闭 |
++| `track_lin_vel_xy_tight` | `0.0` | 是 | tight 前向速度指数奖励关闭 |
++| `stand_still` | `-0.0` | 是 | 线速度+yaw 综合静止项关闭 |
++| `track_height_exp` | `0.0` | 是 | 普通高度指数奖励关闭 |
++| `track_height_exp_soft` | `0.0` | 是 | soft 高度指数奖励关闭 |
++| `track_height_exp_both_wheels_contact` | `0.0` | 是 | 双轮接触高度奖励关闭 |
++| `no_fork_exp` | `-0.0` | 是 | x 方向超阈值连续 exp 惩罚关闭 |
++| `no_fork_z_exp` | `-0.0` | 是 | z 方向错位 exp 惩罚关闭 |
++
++## 5. Landing 专用条目
++
++### 5.1 `landing_wheel_body_x_positive`
++
++设：
++
++\[
++x_{min}=\min(x_L,x_R)
++\]
++
++当前 body-x 阈值和指数宽度均为 `0.03m`：
++
++\[
++d=\max(0,0.03-x_{min})
++\]
++
++\[
++r_{body-x}=\exp\left(-\frac{d}{0.03}\right)
++\]
++
++触发条件必须同时满足：
++
++1. `mt_main_state == AIRBORNE`；
++2. `mt_airborne_phase == LANDING`；
++3. 进入 AIR 时，command overlay 前的原始 `command_generator.command[:,0] > 1.0m/s`；
++4. 当前至少一只主轮接触力范数 `>1N`。
++
++第三个条件会在 AIR 入场时锁存，因此后续 AIR/LANDING command dropout 不会改变本次 Landing 是否启用该 reward。该项只覆盖正向目标；负向目标不会触发。
++
++最终贡献：
++
++\[
++R=10\,r_{body-x}\times0.02=0.2r_{body-x}
++\]
++
++| 较慢轮 body-x | raw reward | 单步最终奖励 |
++| ---: | ---: | ---: |
++| `>=0.03m` | `1.0000` | `+0.2000` |
++| `0.00m` | `0.3679` | `+0.0736` |
++| `-0.03m` | `0.1353` | `+0.0271` |
++| `-0.06m` | `0.0498` | `+0.0100` |
++
++### 5.2 `jump_landing_single_wheel_contact_delay`
++
++进入 Landing 后记录两只轮子第一次满足 contact-history 峰值 `>1N` 的时间。
++
++raw penalty 为二值量：
++
++\[
++r_{delay}=\mathbf{1}(\text{两轮触地时间差}>0.03s\ \text{或一轮缺失超过}0.03s)
++\]
++
++对应两种违规：
++
++- 两轮都已触地，但首次触地时间差 `>0.03s`；
++- 一轮已触地，另一轮超过 `0.03s` 仍未触地。
++
++违规后在当前 Landing 的后续帧持续为 `1`：
++
++\[
++R=-20\times1\times0.02=-0.4/step
++\]
++
++### 5.3 `landing_wheel_max_contact_force`
++
++该项读取当前帧 `net_forces_w`，不是 contact history 峰值：
++
++\[
++F_{max}=\max(\|F_L\|,\|F_R\|)
++\]
++
++\[
++r_F=\operatorname{clip}\left(\frac{F_{max}-200}{400-200},0,1\right)
++\]
++
++只在 Landing phase 生效：
++
++| 最大轮接触力 | raw penalty | 单步最终惩罚 |
++| ---: | ---: | ---: |
++| `<=200N` | `0` | `0` |
++| `300N` | `0.5` | `-0.2` |
++| `>=400N` | `1.0` | `-0.4` |
++
++## 6. 关节、力矩和能耗正则
++
++### 6.1 基础正则公式
++
++| Reward | raw 公式 | 系数 | 乘 `step_dt` 后的倍率 |
++| --- | --- | ---: | ---: |
++| `leg_joint_acc` | 四腿主动关节 \(\sum\ddot q^2\) | `-5e-7` | `-1e-8` |
++| `leg_joint_vel` | 四腿主动关节 \(\sum\dot q^2\) | `-5e-3` | `-1e-4` |
++| `joint_torque` | 四腿+两轮 \(\sum\tau^2\) | `-1e-4` | `-2e-6` |
++| `wheel_acc` | 两轮 \(\sum\ddot q_w^2\) | `-1e-9` | `-2e-11` |
++| `wheel_vel` | 两轮 \(\sum\dot q_w^2\) | `-1e-8` | `-2e-10` |
++| `lin_vel_z` | \((v_z^b)^2\) | `-0.5` | `-0.01` |
++| `ang_vel_xy` | \((\omega_x^b)^2+(\omega_y^b)^2\) | `-0.1` | `-0.002` |
++
++`joint_torque` 使用六个主动执行器的最终 `applied_torque`，不包含被动关节和弹簧力。
++
++### 6.2 `wheel_power`
++
++每只轮的机械功率为：
++
++\[
++P_i=\tau_i\dot q_i
++\]
++
++只惩罚正功率：
++
++\[
++r_P=\sum_i\max(P_i,0)
++\]
++
++系数为 `-1e-5`。制动或回馈时的负机械功率不会被该项惩罚。
++
++### 6.3 最终力矩平滑
++
++定义：
++
++\[
++\Delta\tau_t=\tau_t-\tau_{t-1}
++\]
++
++\[
++\Delta^2\tau_t=\tau_t-2\tau_{t-1}+\tau_{t-2}
++\]
++
++| Reward | raw 公式 | 系数 |
++| --- | --- | ---: |
++| `torque_rate` | 六个主动关节 \(\sum(\Delta\tau)^2\) | `-1e-5` |
++| `torque_smoothness_leg` | 四腿关节 \(\sum(\Delta^2\tau)^2\) | `-1e-5` |
++| `torque_smoothness_wheel` | 两轮 \(\sum(\Delta^2\tau)^2\) | `-1e-4` |
++
++这些差分没有除以 `step_dt`，所以 `torque_rate` 实际是“相邻 policy step 的最终力矩差”，不是严格单位为 `N·m/s` 的物理导数。轮子二阶差分的权重是腿的 10 倍。
++
++## 7. 姿态奖励
++
++当前姿态同时使用负平方惩罚和正指数奖励。
++
++### 7.1 Y 命名方向
++
++源码使用 `projected_gravity_b[:,0]`：
++
++\[
++r_{y,v}=\left[\left(2e^{-c_x^2/1}+2\right)g_x\right]^2
++\]
++
++系数：
++
++```text
++flat_orientation_y_v = -2.0
++```
++
++正指数项：
++
++\[
++r_{y,exp}=e^{-g_x^2/0.01}
++\]
++
++```text
++flat_orientation_y_exp = +1.0
++```
++
++### 7.2 X 命名方向
++
++源码使用 `projected_gravity_b[:,1]`：
++
++\[
++r_{x,v}=\left[\left(2e^{-c_x^2/5}+2\right)g_y\right]^2
++\]
++
++```text
++flat_orientation_x_v = -2.0
++```
++
++\[
++r_{x,exp}=e^{-g_y^2/0.01}
++\]
++
++```text
++flat_orientation_x_exp = +1.0
++```
++
++完全水平时两个 exp 项各提供 `+0.02/step`，合计最大约 `+0.04/step`。
++
++## 8. 速度和 yaw 跟踪
++
++### 8.1 前向速度
++
++虽然 key 名称是 `track_lin_vel_xy`，当前只跟踪前向 x。实际速度先按机体 pitch 投影到水平面：
++
++\[
++v_{x,horizontal}=v_x^b\cos(pitch)
++\]
++
++\[
++e_v=c_x-v_{x,horizontal}
++\]
++
++指数奖励：
++
++\[
++r_{v,exp}=e^{-e_v^2/1.0}
++\]
++
++```text
++track_lin_vel_xy = +1.0
++```
++
++平方惩罚：
++
++\[
++r_{v,sq}=(0.5e_v)^2=0.25e_v^2
++\]
++
++```text
++track_lin_vel_xy_square = -1.0
++```
++
++指数项最大贡献为 `+0.02/step`。
++
++### 8.2 Yaw 角速度
++
++\[
++e_\omega=c_z-\omega_z^b
++\]
++
++\[
++r_{\omega,exp}=e^{-e_\omega^2/0.25}
++\]
++
++```text
++track_ang_vel_z = +0.5
++```
++
++\[
++r_{\omega,sq}=(0.5e_\omega)^2=0.25e_\omega^2
++\]
++
++```text
++track_ang_vel_z_square = -1.0
++```
++
++普通 yaw 指数项最大贡献为 `+0.01/step`。
++
++### 8.3 Stand-still deadzone
++
++当 `|command lin_vel_x| < 0.1m/s` 时，前向跟踪目标按零处理，并启用：
++
++\[
++r_{stand}=|v_x^b|+|v_y^b|
++\]
++
++```text
++stand_still_lin_vel = -2.0
++```
++
++所以：
++
++\[
++R=-2(|v_x^b|+|v_y^b|)\times0.02
++\]
++
++Yaw command 也有 `0.1rad/s` deadzone，但当前综合 `stand_still` 权重为零，因此 yaw 静止主要由已经把目标置零的 yaw tracking 项约束。
++
++## 9. High-spin command profile 动态替换
++
++当 terrain command manager 的有效 profile key 为 `high_spin_for_rm` 时，不增加新 reward key，而是替换已有的两个 yaw raw term。
++
++非 STAIR 状态的最终等价形式为：
++
++\[
++R_{spin,exp}=4.0e^{-e_\omega^2/9.0}\times0.02
++\]
++
++\[
++R_{spin,sq}=-0.02e_\omega^2\times0.02
++\]
++
++配置为：
++
++```text
++track scale  = 4.0
++square scale = -0.02
++sigma        = 9.0
++```
++
++最大 spin 指数奖励为 `+0.08/step`。原生 `high_spin_for_rm` 和 `plane_for_rm` 临时切换到 high-spin profile 的环境都会触发；stop profile 和普通 plane profile 不触发。
++
++## 10. 高度 reward
++
++设：
++
++\[
++e_h=h-h^*
++\]
++
++当前真正启用的高度项为：
++
++### 10.1 Tight 指数奖励
++
++\[
++r_{h,tight}=e^{-e_h^2/0.001}
++\]
++
++```text
++track_height_exp_tight = +1.0
++```
++
++最大贡献为 `+0.02/step`。
++
++### 10.2 平方高度惩罚
++
++\[
++r_{h,sq}=(5e_h)^2=25e_h^2
++\]
++
++```text
++track_height_square = -1.0
++```
++
++高度 reference/target 会随状态改变：
++
++- 普通状态：使用机体相对 raycast 地面的高度；
++- AIR：reference 使用机体相对最高轮心的竖直距离；
++- Slope AIR 不切换到固定腿长 target，继续使用原 height target；
++- LANDING：target 使用进入 Landing 时生成的二次高度参考曲线；
++- 严格 AIR 状态的 state reward scale 将 `track_height_square` 乘 `0`；
++- `track_height_exp_tight` 在 AIR 中仍保持启用。
++
++## 11. 左右腿几何约束
++
++### 11.1 `no_fork`
++
++\[
++d_x=|x_L-x_R|
++\]
++
++硬阈值项：
++
++\[
++r_{fork}=\mathbf{1}(d_x>0.05m)
++\]
++
++```text
++no_fork = -1.0
++```
++
++超过阈值时单步惩罚为 `-0.02`。
++
++### 11.2 `no_fork_square`
++
++\[
++r_{fork,sq}=\left[2(x_L-x_R)\right]^2=4(x_L-x_R)^2
++\]
++
++```text
++no_fork_square = -1.0
++```
++
++该项没有 `0.05m` deadzone，即使未触发硬阈值，也会连续约束左右轮前后错位。
++
++## 12. `undesired_contact`
++
++监控的非期望接触 link 为：
++
++- `base_link`
++- `.*_rear1_link`
++- `.*_rear2_link`
++- `.*_front1_link`
++- `.*_front2_link`
++- `.*_front3_link`
++- `.*_front4_link`
++
++两只主轮不属于 undesired contact。当前 link weight pattern 为空，所以所有监控 link 的权重均为 `1.0`。
++
++只要 contact history 中任一监控 link 的接触力范数 `>1N`：
++
++\[
++r_{contact}=1
++\]
++
++普通状态：
++
++```text
++undesired_contact = -2.0
++最大单步惩罚 = -0.04
++```
++
++LANDING 状态的 `mt_rough_state_gate_cfg` 会把该 raw term 放大 `20` 倍，因此 Landing 的有效系数为：
++
++```text
++-2.0 × 20 = -40.0
++最大单步惩罚 = -0.8
++```
++
++该动态放大很容易在 Landing episode 统计中成为主要负项。
++
++## 13. Termination
++
++```text
++termination = -200.0
++```
++
++raw term 为 `reset_terminated`，即 termination 发生的单帧布尔量。由于还会乘 `step_dt=0.02s`，一次 termination 的典型直接贡献为：
++
++\[
++-200\times1\times0.02=-4
++\]
++
++timeout 与 terminated 在 IsaacLab 中是不同通道；该项使用的是 `reset_terminated`，不是简单按 episode 结束统一扣 `200`。
++
++## 14. 当前被注释的 AIR/LANDING 轮子 reward
++
++以下六项 raw 实现和参数都存在，但没有加入 `_make_v14_slope_rough_rewards()`，因此当前：
++
++- 不进入总 reward；
++- 不生成对应的 `Episode/Reward/*`；
++- 取消注释即可启用，不需要补 raw 计算代码。
++
++### 14.1 `air_wheel_zero_torque_exp`
++
++严格门控在：
++
++```text
++mt_main_state == AIRBORNE
++mt_airborne_phase == AIR
++```
++
++读取两轮最终力矩：
++
++\[
++\tau_{max}=\max(|\tau_L|,|\tau_R|)
++\]
++
++\[
++r_{air,\tau}=\exp\left[-\left(\frac{\tau_{max}}{1.5}\right)^2\right]
++\]
++
++配置：
++
++```text
++scale = +100.0
++sigma = 1.5N·m
++```
++
++若启用：
++
++| 最大绝对轮力矩 | raw reward | 单步最终奖励 |
++| ---: | ---: | ---: |
++| `0N·m` | `1.0000` | `+2.0000` |
++| `0.5N·m` | `0.8948` | `+1.7897` |
++| `1.0N·m` | `0.6412` | `+1.2824` |
++| `1.5N·m` | `0.3679` | `+0.7358` |
++| `2.0N·m` | `0.1690` | `+0.3380` |
++| `3.0N·m` | `0.0183` | `+0.0366` |
++| `4.0N·m` | `0.0008` | `+0.0016` |
++
++它鼓励零主动轮力矩，不要求轮速直接归零。
++
++### 14.2 `air_wheel_acc_limit`
++
++\[
++a_{max}=\max(|\ddot q_L|,|\ddot q_R|)
++\]
++
++\[
++u=\operatorname{clip}\left(\frac{a_{max}-50}{200-50},0,1\right)
++\]
++
++\[
++r_{air,acc}=u^2
++\]
++
++```text
++scale = -10.0
++start = 50rad/s²
++full  = 200rad/s²
++```
++
++| 最大轮加速度 | raw penalty | 单步最终惩罚 |
++| ---: | ---: | ---: |
++| `<=50rad/s²` | `0` | `0` |
++| `100rad/s²` | `0.1111` | `-0.0222` |
++| `125rad/s²` | `0.2500` | `-0.0500` |
++| `150rad/s²` | `0.4444` | `-0.0889` |
++| `>=200rad/s²` | `1.0000` | `-0.2000` |
++
++该项限制轮速变化，不直接限制轮速绝对值。
++
++### 14.3 `air_wheel_directional_speed`
++
++正向 gate：
++
++```text
++当前 reward command lin_vel_x > 1.0m/s
++实际 root_lin_vel_b.x > 1.0m/s
++```
++
++负向 gate：
++
++```text
++当前 reward command lin_vel_x < -1.0m/s
++实际 root_lin_vel_b.x < -1.0m/s
++```
++
++这里使用当前 reward command，可能已经受到 AIR command dropout/overlay 影响，不是 `landing_wheel_body_x_positive` 使用的 AIR 入场原始目标。
++
++目标方向轮速：
++
++\[
++\omega_i^{dir}=\omega_i\cdot direction
++\]
++
++其中正向 `direction=+1`，负向 `direction=-1`。
++
++\[
++s_i=\operatorname{clip}\left(\frac{\omega_i^{dir}-0}{10-0},0,1\right)
++\]
++
++\[
++r_{air,dir}=\min(s_L,s_R)
++\]
++
++```text
++scale = +50.0
++start = 0rad/s
++full  = 10rad/s
++```
++
++启用后，每步最终奖励恰好等于 `min(s_L,s_R)`：
++
++| 目标方向较慢轮轮速 | 单步最终奖励 |
++| ---: | ---: |
++| `<=0rad/s` 或反向 | `0` |
++| `2.5rad/s` | `+0.25` |
++| `5rad/s` | `+0.50` |
++| `7.5rad/s` | `+0.75` |
++| `>=10rad/s` | `+1.00` |
++
++负向目标完全对称：两轮都 `<=-10rad/s` 时满奖励。
++
++### 14.4 Landing wheel reward window
++
++下面三个 Landing 轮子条目共用 window：
++
++```text
++进入 LANDING
++    ↓
++window 立即打开
++    ↓
++分别锁存两轮 contact-history 峰值 > 1N
++    ↓
++双轮均接触后继续保持配置时间
++    ↓
++关闭，或 LANDING 提前结束时立即关闭
++```
++
++当前：
++
++```text
++landing_wheel_reward_post_both_contact_duration_s = 0.05s
++```
++
++代码使用 `ceil(duration / step_dt)`：
++
++```text
++ceil(0.05 / 0.02) = 3 policy steps
++```
++
++因此实际离散保持时间约为 `60ms`。
++
++### 14.5 `landing_wheel_zero_torque_exp`
++
++公式与 AIR 零力矩奖励相同：
++
++\[
++r_{land,\tau}=\exp\left[-\left(\frac{\max(|\tau_L|,|\tau_R|)}{1.5}\right)^2\right]
++\]
++
++```text
++scale = +100.0
++sigma = 1.5N·m
++```
++
++启用后零力矩最大为 `+2.0/step`，但只在 Landing wheel reward window 中有效。
++
++### 14.6 `landing_wheel_acc_limit`
++
++公式与 AIR 加速度限制相同：
++
++\[
++r_{land,acc}=\operatorname{clip}\left(\frac{a_{max}-50}{150},0,1\right)^2
++\]
++
++当前系数为：
++
++```text
++scale = -0.0
++```
++
++所以即使只取消注释，它仍不会影响总 reward。需要实际启用时还要将 scale 改为非零，例如 `-10.0`。
++
++### 14.7 `landing_wheel_directional_speed_shortfall`
++
++方向 gate 与 AIR directional speed 相同，分别要求目标和实际速度同方向越过 `1.0m/s`。
++
++\[
++s_i=\operatorname{clip}\left(\frac{\omega_i^{dir}}{10},0,1\right)
++\]
++
++两轮取较慢者：
++
++\[
++s_{min}=\min(s_L,s_R)
++\]
++
++raw shortfall：
++
++\[
++r_{shortfall}=1-s_{min}
++\]
++
++```text
++scale = -200.0
++```
++
++| 目标方向较慢轮轮速 | raw penalty | 单步最终惩罚 |
++| ---: | ---: | ---: |
++| `>=10rad/s` | `0` | `0` |
++| `7.5rad/s` | `0.25` | `-1.0` |
++| `5rad/s` | `0.50` | `-2.0` |
++| `2.5rad/s` | `0.75` | `-3.0` |
++| 零速或反向 | `1.00` | `-4.0` |
++
++该项非常强。若持续三个 Landing window step 满惩罚，总计约 `-12`。
++
++### 14.8 三个 AIR/LANDING 轮子条目的组合意图
++
++AIR 三项共同表达：
++
++```text
++保持目标方向轮速
++        +
++尽量减少主动轮力矩
++        +
++避免轮速剧烈变化
++```
++
++这更接近“轮子依靠惯性和自然阻尼缓慢变化”，而不是直接要求轮速归零。
++
++Landing 三项共同表达：
++
++```text
++落地前后短窗口保持目标方向轮速
++        +
++尽量减小主动轮力矩
++        +
++可选地限制轮加速度
++```
++
++但当前预设强度并不平衡：
++
++- 零力矩奖励最大 `+2/step`；
++- 轮速缺口惩罚最大 `-4/step`；
++- Landing 加速度惩罚当前为零。
++
++全部启用后，Landing 更容易被方向轮速缺口主导。例如零力矩满奖励但轮速为零时：
++
++\[
+++2-4=-2/step
++\]
++
++## 15. MT 状态对 raw reward 的动态放缩
++
++在 reward 表系数之外，`mt_rough_state_gate_cfg` 会在加权前放缩部分 raw term。
++
++这里要区分两套机制：
++
++- `velocity` / `height` 下的 upright、orientation、height gate 决定 tracking reward 是否再乘一个 `[0,1]` 门控值；
++- `reward_scales` 直接按状态放缩指定 raw reward。
++
++当前 `normal`、`slope`、`stair`、`airborne`、`landing` 的 velocity/height gate 都配置为 `enabled=False`，因此这些门控当前恒等于 `1`，不会削弱速度或高度 tracking。当前真正生效的状态差异来自下面的 `reward_scales`，以及 STAIR 独立 reward 表。
++
++当前关键动态 scale：
++
++| MT 状态 | Reward | raw scale | 最终影响 |
++| --- | --- | ---: | --- |
++| `NORMAL` | `undesired_contact` | `1.0` | 不变 |
++| `SLOPE` | 当前无 active override | `1.0` | 不变 |
++| `AIR` | `track_height_square` | `0.0` | AIR 中关闭平方高度惩罚 |
++| `AIR` | `track_height_exp` | `0.0` | 本身权重也为零 |
++| `AIR` | `track_height_exp_soft` | `0.0` | 本身权重也为零 |
++| `LANDING` | `undesired_contact` | `20.0` | 有效系数从 `-2` 变成 `-40` |
++| `LANDING` | `lin_vel_z` | `1.0` | 不变 |
++
++Slope-Rough 当前 reset 失能配置：
++
++```text
++reset_zero_torque_reward_term_scales = {}
++```
++
++因此 20% reset 最终力矩失能窗口不会关闭或缩放 reward；所有 reward 和 termination 均照常计算。
++
++## 16. 真实 STAIR 状态的第二张 reward 表
++
++Slope-Rough 设置：
++
++```text
++stair_reward_tables_enabled = True
++```
++
++当：
++
++- `mt_main_state == STAIR`；或
++- 当前帧是 `stair_expert_success_event`；或
++- 当前帧是 `stair_expert_failure_event`
++
++会改用 `_make_v14_slope_rough_stair_rewards()`。仅位于 stair terrain 或只输出 stair flag，不足以切换 reward 表。
++
++### 16.1 STAIR 表完整系数
++
++| Reward | STAIR 系数 |
++| --- | ---: |
++| `termination` | `-200.0` |
++| `leg_joint_acc` | `-5e-7` |
++| `leg_joint_vel` | `-5e-3` |
++| `leg_joint_pair_pos_diff` | `-0.0` |
++| `joint_torque` | `-1e-4` |
++| `wheel_acc` | `-1e-8` |
++| `wheel_vel` | `-1e-5` |
++| `wheel_power` | `-1e-4` |
++| `wheel_air_spin` | `0.0` |
++| `lin_vel_z` | `-0.5` |
++| `ang_vel_xy` | `-0.05` |
++| `action_smoothness_leg` | `-0.05` |
++| `action_rate` | `-0.05` |
++| `action_smoothness_wheel` | `-0.01` |
++| `flat_orientation_y` | `-0.0` |
++| `flat_orientation_y_v` | `-2.0` |
++| `flat_orientation_y_exp` | `+0.5` |
++| `flat_orientation_x` | `-0.0` |
++| `flat_orientation_x_v` | `-2.0` |
++| `flat_orientation_x_exp` | `+0.5` |
++| `track_lin_vel_xy` | `+0.5` |
++| `track_lin_vel_xy_tight` | `0.0` |
++| `track_lin_vel_xy_square` | `-0.5` |
++| `track_ang_vel_z` | `+1.0` |
++| `track_ang_vel_z_square` | `-1.0` |
++| `track_height_exp` | `+0.5` |
++| `track_height_exp_soft` | `0.0` |
++| `track_height_exp_tight` | `+0.5` |
++| `track_height_square` | `-1.0` |
++| `track_height_exp_both_wheels_contact` | `0.0` |
++| `no_fork` | `-1.0` |
++| `no_fork_square` | `-1.0` |
++| `no_fork_exp` | `-0.0` |
++| `no_fork_z_exp` | `-1.0` |
++| `undesired_contact` | `-0.005` |
++| `stair_success` | `+0.2` |
++| `stair_time_bonus` | `0.0` |
++| `stair_failure` | `+0.2` |
++| `torque_smoothness_leg` | `-1e-5` |
++| `torque_rate` | `-1e-5` |
++| `torque_smoothness_wheel` | `-1e-4` |
++
++### 16.2 相比非 STAIR 表的主要变化
++
++| Reward | 非 STAIR | STAIR | 变化 |
++| --- | ---: | ---: | --- |
++| `wheel_acc` | `-1e-9` | `-1e-8` | 强 10 倍 |
++| `wheel_vel` | `-1e-8` | `-1e-5` | 强 1000 倍 |
++| `wheel_power` | `-1e-5` | `-1e-4` | 强 10 倍 |
++| `ang_vel_xy` | `-0.1` | `-0.05` | 弱一半 |
++| `flat_orientation_x/y_exp` | `+1.0` | `+0.5` | 弱一半 |
++| `track_lin_vel_xy` | `+1.0` | `+0.5` | 弱一半 |
++| `track_lin_vel_xy_square` | `-1.0` | `-0.5` | 弱一半 |
++| `track_ang_vel_z` | `+0.5` | `+1.0` | 强 2 倍 |
++| `track_height_exp` | `0.0` | `+0.5` | STAIR 中启用 |
++| `track_height_exp_tight` | `+1.0` | `+0.5` | 弱一半 |
++| `undesired_contact` | `-2.0` | `-0.005` | STAIR 中大幅弱化 |
++
++STAIR 还启用 policy action 平滑：
++
++\[
++r_{action-rate}=\sum(a_t-a_{t-1})^2
++\]
++
++\[
++r_{action-smooth}=\sum(a_t-2a_{t-1}+a_{t-2})^2
++\]
++
++其中腿、轮分别取对应 action slice。注意这些是 policy action 平滑，不是最终力矩平滑；STAIR 同时保留三项 torque 平滑。
++
++### 16.3 STAIR success/failure 事件
++
++默认事件幅值：
++
++```text
++stair_expert_success_reward = +50
++stair_expert_failure_penalty = -50
++```
++
++raw event 在源码中先除以 `step_dt`，后续 reward 流程再乘 `step_dt`，因此事件总量保持为 `±50`。应用 STAIR 表系数 `0.2` 后：
++
++```text
++单次 stair success ≈ +10
++单次 stair failure ≈ -10
++```
++
++`stair_time_bonus=0.0`，当前不计入总 reward。
++
++## 17. 当前 reward 的量级判断
++
++### 17.1 有界正奖励的单步上限
++
++| Reward | 单步最大值 |
++| --- | ---: |
++| `landing_wheel_body_x_positive` | `+0.20` |
++| `flat_orientation_y_exp` | `+0.02` |
++| `flat_orientation_x_exp` | `+0.02` |
++| `track_lin_vel_xy` | `+0.02` |
++| `track_ang_vel_z` | `+0.01` |
++| `track_height_exp_tight` | `+0.02` |
++| high-spin yaw exp | `+0.08` |
++| 注释中的 AIR/Landing 零轮力矩奖励 | `+2.00` |
++| 注释中的 AIR directional speed | `+1.00` |
++
++可以看到，如果取消注释，`air_wheel_zero_torque_exp=100` 的单步最大值 `+2` 会明显大于当前常规 tracking 奖励。
++
++### 17.2 有界 Landing 惩罚上限
++
++| Reward | 单步最大惩罚 |
++| --- | ---: |
++| `jump_landing_single_wheel_contact_delay` | `-0.40` |
++| `landing_wheel_max_contact_force` | `-0.40` |
++| Landing `undesired_contact` 动态放大后 | `-0.80` |
++| 注释中的 `landing_wheel_directional_speed_shortfall` | `-4.00` |
++
++### 17.3 无界平方项
++
++以下项会随误差平方持续增长，没有 raw 上限：
++
++- `leg_joint_acc`
++- `leg_joint_vel`
++- `joint_torque`
++- `wheel_acc`
++- `wheel_vel`
++- `lin_vel_z`
++- `ang_vel_xy`
++- 三项 torque 差分
++- `flat_orientation_x/y_v`
++- `track_lin_vel_xy_square`
++- `track_ang_vel_z_square`
++- `track_height_square`
++- `no_fork_square`
++
++因此判断 reward 是否“太大”时，不能只看 scale 的绝对值。例如 `wheel_acc=-1e-9` 很小，但 \(rad/s^2\) 的平方可能很大；`leg_joint_vel=-5e-3` 则很容易成为持续性主导惩罚。
++
++## 18. 启用注释 reward 时的检查清单
++
++取消 AIR/LANDING 轮子 reward 注释前，建议逐项确认：
++
++1. `air_wheel_zero_torque_exp=100` 的最大 `+2/step` 是否压过主任务 tracking；
++2. `landing_wheel_directional_speed_shortfall=-200` 的最大 `-4/step` 是否过强；
++3. `landing_wheel_acc_limit` 当前 scale 为 `-0.0`，仅取消注释仍无效；
++4. `0.05s` Landing hold 在 50Hz policy 下离散为约 `60ms`；
++5. 零力矩奖励和方向轮速约束可能同时作用，含义是“尽量靠惯性保持正确轮速”，而不是完全不关心轮速；
++6. 先观察对应 `Episode/Reward/*`、AIR/LANDING phase 占比、轮速、轮加速度和 `applied_torque` 分布，再决定 scale；
++7. 对旧 checkpoint 做对比时保存新的 `params/env.yaml`，避免把源码 reward 与旧 run reward 混为一谈。
++
++## 19. 源码证据索引
++
++| 内容 | 文件 / 符号 |
++| --- | --- |
++| Slope 非 STAIR reward 表 | `wheelbipe_V14/env_cfg.py::_make_v14_slope_rough_rewards()` |
++| Slope STAIR reward 表 | `wheelbipe_V14/env_cfg.py::_make_v14_slope_rough_stair_rewards()` |
++| Slope train/play 双表配置 | `WheelbipeV14SlopeRoughEnvCfg`、`WheelbipeV14SlopeRoughEnvCfg_Play` |
++| raw reward 主函数 | `wheelbipe25_v3/env.py::_get_rewards()` |
++| `step_dt` 时间积分 | `wheelbipe25_v3/env.py` 中 `raw_rewards = {k: v * self.step_dt ...}` |
++| STAIR 双表选择 | `wheelbipe25_v3/env.py::_apply_stair_state_reward_weights()` |
++| Landing 单轮接触延迟 | `wheelbipe25_v3/env.py::_get_landing_single_wheel_contact_delay()` |
++| Landing wheel window | `wheelbipe25_v3/env.py::_get_landing_wheel_reward_gate_mask()` |
++| Landing body-x exp | `wheelbipe25_v3/env.py` 中 `rew_landing_wheel_body_x_positive` |
++| AIR 入场原始目标锁存 | `state_machines/airborne.py` 中 `mt_airborne_landing_wheel_body_x_reward_enabled` |
++| MT phase reward scale | `wheelbipe_V14/cfg_utils.py::_default_v14_mt_rough_state_gate_cfg()` |
++| high-spin yaw 替换 | `wheelbipe_V14/env.py::_replace_terrain_command_spin_reward_terms()` |
++| undesired contact link 列表 | `wheelbipe25_v3/env.py` 中 `_undesired_contact_link_idx` 初始化 |
++
++## 20. 一句话总结
++
++当前 Slope-Rough 的主 reward 由“前向/yaw/高度跟踪 + 姿态稳定 + Landing 几何与冲击约束 + 关节/轮/最终力矩正则”组成；真实 STAIR 状态会切换到更重轮速/轮功率和 action 平滑、但大幅弱化 undesired contact 的第二张表。AIR/LANDING 的零轮力矩、轮加速度和方向轮速六项虽然 raw 实现完整，但当前全部被注释，其中预设的零力矩奖励与 Landing 方向轮速缺口惩罚远强于常规 tracking，启用时必须结合 phase 占比和采样数据重新平衡。
+diff --git a/source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py b/source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py
+index 364e9cf..28f4b00 100644
+--- a/source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py
++++ b/source/agent_tasks/agent_tasks/direct/wheelbipe/state_machines/airborne.py
+@@ -48,6 +48,22 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             env.num_envs, 3, dtype=torch.bool, device=env.device
+         )
+ 
++    def _ensure_entry_command_buffers(self, env) -> None:
++        if hasattr(env, "airborne_entry_command"):
++            return
++        env.airborne_entry_command = torch.zeros(
++            env.num_envs, 3, dtype=torch.float, device=env.device
++        )
++
++    def _clear_entry_command(self, env, env_mask: torch.Tensor | None = None) -> None:
++        if not hasattr(env, "airborne_entry_command"):
++            return
++        if env_mask is None:
++            env.airborne_entry_command.zero_()
++            return
++        if torch.any(env_mask):
++            env.airborne_entry_command[env_mask] = 0.0
++
+     def _clear_command_override(self, env, env_mask: torch.Tensor | None = None) -> None:
+         if not hasattr(env, "airborne_command_override_active"):
+             return
+@@ -61,6 +77,153 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             env.airborne_command_override_values[env_mask] = 0.0
+             env.airborne_command_override_field_mask[env_mask] = False
+ 
++    def _ensure_landing_trajectory_buffers(self, env) -> None:
++        if hasattr(env, "airborne_landing_traj_active"):
++            return
++        env.airborne_landing_traj_active = torch.zeros(
++            env.num_envs, dtype=torch.bool, device=env.device
++        )
++        env.airborne_landing_traj_time = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_h0 = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_v0 = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_acc = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_quad = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_target_height = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++        env.airborne_landing_traj_duration = torch.zeros(
++            env.num_envs, dtype=torch.float, device=env.device
++        )
++
++    def _clear_landing_trajectory(self, env, env_mask: torch.Tensor | None = None) -> None:
++        if not hasattr(env, "airborne_landing_traj_active"):
++            return
++        if env_mask is None:
++            env.airborne_landing_traj_active.zero_()
++            env.airborne_landing_traj_time.zero_()
++            env.airborne_landing_traj_h0.zero_()
++            env.airborne_landing_traj_v0.zero_()
++            env.airborne_landing_traj_acc.zero_()
++            env.airborne_landing_traj_quad.zero_()
++            env.airborne_landing_traj_target_height.zero_()
++            env.airborne_landing_traj_duration.zero_()
++            return
++        if torch.any(env_mask):
++            env.airborne_landing_traj_active[env_mask] = False
++            env.airborne_landing_traj_time[env_mask] = 0.0
++            env.airborne_landing_traj_h0[env_mask] = 0.0
++            env.airborne_landing_traj_v0[env_mask] = 0.0
++            env.airborne_landing_traj_acc[env_mask] = 0.0
++            env.airborne_landing_traj_quad[env_mask] = 0.0
++            env.airborne_landing_traj_target_height[env_mask] = 0.0
++            env.airborne_landing_traj_duration[env_mask] = 0.0
++
++    def _landing_trajectory_cfg(self, cfg: dict) -> dict:
++        landing_cfg = cfg.get("landing_trajectory", {})
++        return landing_cfg if isinstance(landing_cfg, dict) else {}
++
++    def _landing_trajectory_enabled(self, cfg: dict) -> bool:
++        return bool(cfg.get("enabled", False)) and bool(
++            self._landing_trajectory_cfg(cfg).get("enabled", False)
++        )
++
++    def _get_body_relative_ground_height(self, env) -> torch.Tensor:
++        return env.robot.data.root_pos_w[:, 2] - env.ground_z_est
++
++    def _get_landing_trajectory_reference(self, env) -> tuple[torch.Tensor, torch.Tensor]:
++        self._ensure_landing_trajectory_buffers(env)
++        duration = torch.clamp(env.airborne_landing_traj_duration, min=env.step_dt)
++        t = torch.minimum(torch.clamp(env.airborne_landing_traj_time, min=0.0), duration)
++        h_ref = (
++            env.airborne_landing_traj_h0
++            + env.airborne_landing_traj_v0 * t
++            + 0.5 * env.airborne_landing_traj_acc * torch.square(t)
++        )
++        v_ref = env.airborne_landing_traj_v0 + env.airborne_landing_traj_acc * t
++        return h_ref, v_ref
++
++    def _update_landing_trajectory(self, env, cfg: dict, update_mask: torch.Tensor) -> None:
++        landing_cfg = self._landing_trajectory_cfg(cfg)
++        self._ensure_landing_trajectory_buffers(env)
++        if not bool(landing_cfg.get("enabled", False)):
++            self._clear_landing_trajectory(env)
++            return
++
++        active = env.airborne_landing_traj_active
++        active_update = update_mask & active & env.height_reward_airborne_state
++        env.airborne_landing_traj_time.copy_(
++            torch.where(
++                active_update,
++                env.airborne_landing_traj_time + env.step_dt,
++                env.airborne_landing_traj_time,
++            )
++        )
++        duration_done = active & (
++            env.airborne_landing_traj_time >= env.airborne_landing_traj_duration
++        )
++        self._clear_landing_trajectory(env, update_mask & (~env.height_reward_airborne_state))
++        self._clear_landing_trajectory(env, update_mask & duration_done)
++
++        wheel_exit_time = getattr(env, "airborne_wheel_contact_exit_time", None)
++        if wheel_exit_time is None:
++            return
++        start_contact_duration_s = max(
++            float(landing_cfg.get("start_wheel_contact_duration_s", 0.02)),
++            0.0,
++        )
++        contact_started = torch.any(wheel_exit_time >= start_contact_duration_s, dim=1)
++        min_down_vel = max(float(landing_cfg.get("min_down_vel", 0.05)), 0.0)
++        lin_vel_z = env.robot.data.root_lin_vel_w[:, 2]
++        start_height = self._get_body_relative_ground_height(env)
++        target_height = float(landing_cfg.get("target_height", landing_cfg.get("final_height", 0.24)))
++        end_vel_z = min(float(landing_cfg.get("end_vel_z", 0.0)), 0.0)
++        min_height_margin = max(float(landing_cfg.get("min_height_margin", 0.02)), 0.0)
++        duration_s = max(float(landing_cfg.get("duration_s", 0.25)), env.step_dt)
++        displacement = target_height - start_height
++        ref_v0 = 2.0 * displacement / duration_s - end_vel_z
++        acceleration = (end_vel_z - ref_v0) / duration_s
++        max_abs_acc = landing_cfg.get("max_abs_acc", None)
++        if max_abs_acc is not None:
++            max_abs_acc = max(float(max_abs_acc), 0.0)
++            acc_ok = (
++                torch.abs(acceleration) <= max_abs_acc
++                if max_abs_acc > 0.0
++                else torch.ones_like(update_mask, dtype=torch.bool)
++            )
++        else:
++            acc_ok = torch.ones_like(update_mask, dtype=torch.bool)
++        can_start = (
++            update_mask
++            & env.height_reward_airborne_state
++            & (~env.airborne_landing_traj_active)
++            & (~duration_done)
++            & contact_started
++            & (lin_vel_z < -min_down_vel)
++            & (start_height > target_height + min_height_margin)
++            & acc_ok
++        )
++        if not torch.any(can_start):
++            return
++
++        env.airborne_landing_traj_active[can_start] = True
++        env.airborne_landing_traj_time[can_start] = 0.0
++        env.airborne_landing_traj_h0[can_start] = start_height[can_start]
++        env.airborne_landing_traj_v0[can_start] = ref_v0[can_start]
++        env.airborne_landing_traj_acc[can_start] = acceleration[can_start]
++        env.airborne_landing_traj_quad[can_start] = 0.0
++        env.airborne_landing_traj_target_height[can_start] = target_height
++        env.airborne_landing_traj_duration[can_start] = duration_s
++
+     def _sample_range_spec(self, env, value, count: int) -> torch.Tensor:
+         sampler = getattr(env, "_sample_permission_range_spec", None)
+         if callable(sampler):
+@@ -318,23 +481,140 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+     def _get_reward_window_mask(self, env, addition_cfg: dict) -> torch.Tensor:
+         active_mask = env.height_reward_airborne_state
+         max_contact_duration_s = addition_cfg.get("before_wheel_contact_duration_s", None)
+-        if max_contact_duration_s is None:
++        min_contact_duration_s = addition_cfg.get("after_wheel_contact_duration_s", None)
++        require_contact_started = bool(addition_cfg.get("require_wheel_contact_timer_started", False))
++        if max_contact_duration_s is None and min_contact_duration_s is None and not require_contact_started:
+             return active_mask
+ 
+         wheel_exit_time = getattr(env, "airborne_wheel_contact_exit_time", None)
+         if wheel_exit_time is None:
++            if require_contact_started or min_contact_duration_s is not None:
++                return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+             return active_mask
+ 
+-        max_contact_duration_s = max(float(max_contact_duration_s), 0.0)
+-        contact_reached = wheel_exit_time >= max_contact_duration_s
++        contact_mode = addition_cfg.get("contact_mode", "any_wheel")
++        if contact_mode not in ("any_wheel", "both_wheels"):
++            raise ValueError(f"Unsupported airborne reward contact_mode: {contact_mode}")
++
++        def _reduce_contact_mask(contact_mask: torch.Tensor) -> torch.Tensor:
++            if contact_mode == "any_wheel":
++                return torch.any(contact_mask, dim=1)
++            return torch.all(contact_mask, dim=1)
++
++        if require_contact_started:
++            active_mask = active_mask & _reduce_contact_mask(wheel_exit_time > 0.0)
++
++        if min_contact_duration_s is not None:
++            min_contact_duration_s = max(float(min_contact_duration_s), 0.0)
++            active_mask = active_mask & _reduce_contact_mask(wheel_exit_time >= min_contact_duration_s)
++
++        if max_contact_duration_s is not None:
++            max_contact_duration_s = max(float(max_contact_duration_s), 0.0)
++            stop_mask = _reduce_contact_mask(wheel_exit_time >= max_contact_duration_s)
++            active_mask = active_mask & (~stop_mask)
++
++        return active_mask
++
++    def _get_wheel_contact_started_mask(
++        self,
++        env,
++        addition_cfg: dict,
++    ) -> torch.Tensor:
++        active_mask = env.height_reward_airborne_state
++        wheel_exit_time = getattr(env, "airborne_wheel_contact_exit_time", None)
++        if wheel_exit_time is None:
++            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
++
++        start_duration_s = max(
++            float(
++                addition_cfg.get(
++                    "start_wheel_contact_duration_s",
++                    addition_cfg.get("wheel_contact_duration_s", 0.02),
++                )
++            ),
++            0.0,
++        )
++        contact_reached = wheel_exit_time >= start_duration_s
+         contact_mode = addition_cfg.get("contact_mode", "any_wheel")
+         if contact_mode == "any_wheel":
+-            stop_mask = torch.any(contact_reached, dim=1)
++            contact_started = torch.any(contact_reached, dim=1)
+         elif contact_mode == "both_wheels":
+-            stop_mask = torch.all(contact_reached, dim=1)
++            contact_started = torch.all(contact_reached, dim=1)
+         else:
+             raise ValueError(f"Unsupported airborne reward contact_mode: {contact_mode}")
+-        return active_mask & (~stop_mask)
++        return active_mask & contact_started
++
++    def _get_wheel_contact_force_mask(
++        self,
++        env,
++        addition_cfg: dict,
++    ) -> torch.Tensor:
++        contact_force_threshold = addition_cfg.get("contact_force_threshold", None)
++        if contact_force_threshold is None:
++            return torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
++
++        contact_forces_w = self._get_current_contact_forces(env)
++        if contact_forces_w is None or len(getattr(env, "_desired_contact_link_idx", [])) == 0:
++            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
++
++        wheel_forces = torch.norm(contact_forces_w[:, env._desired_contact_link_idx], dim=-1)
++        contact_reached = wheel_forces > float(contact_force_threshold)
++        contact_mode = addition_cfg.get("contact_mode", "any_wheel")
++        if contact_mode == "any_wheel":
++            return torch.any(contact_reached, dim=1)
++        if contact_mode == "both_wheels":
++            return torch.all(contact_reached, dim=1)
++        raise ValueError(f"Unsupported airborne reward contact_mode: {contact_mode}")
++
++    def _get_reward_command_lin_vel_x(self, env, addition_cfg: dict) -> torch.Tensor:
++        if bool(addition_cfg.get("use_entry_command", False)):
++            entry_command = getattr(env, "airborne_entry_command", None)
++            if entry_command is not None:
++                return entry_command[:, 0]
++        return env.command[:, 0]
++
++    def _get_directional_wheel_speed_score(
++        self,
++        env,
++        addition_cfg: dict,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        zero = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
++        wheel_idx = getattr(env, "_wheel_idx", [])
++        if len(wheel_idx) == 0:
++            return zero, zero
++
++        reward_mask = self._get_reward_window_mask(env, addition_cfg)
++        command_x = self._get_reward_command_lin_vel_x(env, addition_cfg)
++        root_vel_x = env.robot.data.root_lin_vel_b[:, 0]
++        command_threshold = max(float(addition_cfg.get("command_x_threshold", 1.0)), 0.0)
++        root_vel_threshold = max(float(addition_cfg.get("root_x_threshold", 1.0)), 0.0)
++
++        positive_mask = (command_x > command_threshold) & (root_vel_x > root_vel_threshold)
++        negative_mask = (command_x < -command_threshold) & (root_vel_x < -root_vel_threshold)
++        direction_gate = positive_mask | negative_mask
++        direction = torch.zeros_like(command_x)
++        direction[positive_mask] = 1.0
++        direction[negative_mask] = -1.0
++
++        speed_start = float(addition_cfg.get("start", 0.0))
++        speed_full = float(addition_cfg.get("full", 10.0))
++        denom = max(speed_full - speed_start, 1.0e-6)
++        wheel_vel = env.joint_vel[:, wheel_idx]
++        directional_speed = wheel_vel * direction.unsqueeze(-1)
++        wheel_scores = torch.clamp((directional_speed - speed_start) / denom, 0.0, 1.0)
++
++        reduce = addition_cfg.get("reduce", "min")
++        if reduce == "min":
++            score = wheel_scores.min(dim=1).values
++        elif reduce == "mean":
++            score = wheel_scores.mean(dim=1)
++        elif reduce == "max":
++            score = wheel_scores.max(dim=1).values
++        else:
++            raise ValueError(f"Unsupported directional wheel speed reduce mode: {reduce}")
++
++        gate_f = (reward_mask & direction_gate).float()
++        return gate_f * score, gate_f
+ 
+     def _get_leg_lengths(self, env) -> torch.Tensor:
+         _, _, wheel_pos_heading_b, _, _ = env._get_root_quat_inv_and_wheel_pos_b()
+@@ -430,6 +710,8 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+                 last_update_step.fill_(-1)
+             self._zero_exit_timers(env)
+             self._clear_command_override(env)
++            self._clear_landing_trajectory(env)
++            self._clear_entry_command(env)
+             return
+ 
+         # 新的进入事件会进入 airborne。退出由轮子/base_link 接触力连续满足阈值来决定。
+@@ -447,7 +729,7 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         # 1. 机身相对地面足够高；
+         # 2. 两个轮心都高于“轮半径 + 离地阈值”，避免只因地面估计抖动误判。
+         enter_cfg = cfg.get("enter", {})
+-        body_relative_ground_height = env.robot.data.root_pos_w[:, 2] - env.ground_z_est
++        body_relative_ground_height = self._get_body_relative_ground_height(env)
+         wheel_relative_ground_heights = env._get_wheel_relative_ground_heights_raw()
+         wheel_radius = float(enter_cfg["wheel_radius"])
+         enter_body_threshold = float(enter_cfg["body_height_threshold"])
+@@ -495,6 +777,10 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         airborne_enter_event = update_mask & enter_mask & (~prev_airborne_state)
+         if torch.any(airborne_enter_event):
+             enter_time[airborne_enter_event] = 0.0
++            self._ensure_entry_command_buffers(env)
++            env.airborne_entry_command[airborne_enter_event] = env.command[
++                airborne_enter_event, :3
++            ]
+         if force_enter_request is not None:
+             force_enter_request[update_mask] = False
+         contact_forces_w = self._get_current_contact_forces(env)
+@@ -591,6 +877,8 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         self._sample_command_override_on_enter(env, cfg, airborne_enter_event)
+         clear_override_mask = update_mask & (~next_airborne_state)
+         self._clear_command_override(env, clear_override_mask)
++        self._clear_entry_command(env, clear_override_mask)
++        self._update_landing_trajectory(env, cfg, update_mask)
+         max_duration = getattr(env, "airborne_max_duration", None)
+         if current_duration is not None and max_duration is not None:
+             current_duration.copy_(
+@@ -618,6 +906,9 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         cfg = self._cfg(env)
+         if not self._height_reward_override_enabled(cfg):
+             return relative_obs_height
++        landing_active = getattr(env, "airborne_landing_traj_active", None)
++        if landing_active is None:
++            landing_active = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+         # 普通状态下使用“机身相对地面高度”；airborne 状态下改用轮位置构造的高度参考。
+         # 腿长模式本身就是轮心口径；非腿长模式要加回轮半径，保持 root-to-ground 高度口径。
+         body_minus_highest_wheel_z = env.robot.data.root_pos_w[:, 2] - torch.amax(
+@@ -629,7 +920,7 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             wheel_radius = float(self._cfg(env).get("enter", {})["wheel_radius"])
+             airborne_reference_height = body_minus_highest_wheel_z + wheel_radius
+         return torch.where(
+-            env.height_reward_airborne_state,
++            env.height_reward_airborne_state & (~landing_active),
+             airborne_reference_height,
+             relative_obs_height,
+         )
+@@ -638,6 +929,14 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         self, env, target_height: torch.Tensor
+     ) -> torch.Tensor:
+         cfg = self._cfg(env)
++        if not bool(cfg.get("enabled", False)):
++            return target_height
++        landing_active = getattr(env, "airborne_landing_traj_active", None)
++        if landing_active is None:
++            landing_active = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
++        if torch.any(landing_active):
++            landing_h_ref, _ = self._get_landing_trajectory_reference(env)
++            target_height = torch.where(landing_active, landing_h_ref, target_height)
+         if not self._height_reward_override_enabled(cfg):
+             return target_height
+ 
+@@ -664,7 +963,9 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             max=max_height_target,
+         )
+         return torch.where(
+-            env.height_reward_airborne_state, airborne_target_height, target_height
++            env.height_reward_airborne_state & (~landing_active),
++            airborne_target_height,
++            target_height,
+         )
+ 
+     def apply_reward_term_scales(
+@@ -691,7 +992,14 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             reward_terms[term_name] = reward_terms[term_name] * scale
+ 
+         reward_additions = self._cfg(env).get("reward_additions", {})
++        reward_weights = getattr(env.cfg, "rewards", {})
+         for term_name, addition_cfg in reward_additions.items():
++            # reward_additions are materialized before cfg.rewards filters terms.
++            # Skip disabled additions here so expensive contact/kinematics terms do
++            # not run every step when their final reward weight is zero or absent.
++            reward_weight = reward_weights.get(term_name, None)
++            if reward_weight is None or float(reward_weight) == 0.0:
++                continue
+             if isinstance(addition_cfg, dict):
+                 addition_type = addition_cfg.get("type", "constant")
+                 if addition_type == "constant":
+@@ -775,6 +1083,69 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+                             added_reward = airborne_mask_f * wheel_penalty.sum(dim=1)
+                         else:
+                             raise ValueError(f"Unsupported wheel_contact_force_over reduce mode: {reduce}")
++                elif addition_type == "landing_wheel_max_contact_force":
++                    contact_forces_w = self._get_current_contact_forces(env)
++                    if contact_forces_w is None or len(getattr(env, "_desired_contact_link_idx", [])) == 0:
++                        added_reward = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
++                    else:
++                        reward_mask = self._get_wheel_contact_started_mask(env, addition_cfg)
++                        reward_mask &= self._get_wheel_contact_force_mask(env, addition_cfg)
++                        force_start = float(addition_cfg.get("force_start", 200.0))
++                        force_full = float(addition_cfg.get("force_full", 400.0))
++                        denom = max(force_full - force_start, 1.0e-6)
++                        wheel_forces = torch.norm(
++                            contact_forces_w[:, env._desired_contact_link_idx], dim=-1
++                        )
++                        max_wheel_force = wheel_forces.max(dim=1).values
++                        added_reward = reward_mask.float() * torch.clamp(
++                            (max_wheel_force - force_start) / denom,
++                            0.0,
++                            1.0,
++                        )
++                elif addition_type == "landing_wheel_body_x_positive":
++                    reward_mask = self._get_wheel_contact_started_mask(env, addition_cfg)
++                    reward_mask &= self._get_wheel_contact_force_mask(env, addition_cfg)
++                    command_x_min = float(addition_cfg.get("command_x_min", 1.0))
++                    command_x = self._get_reward_command_lin_vel_x(env, addition_cfg)
++                    reward_mask &= command_x > command_x_min
++                    target_x = float(addition_cfg.get("target_x", 0.03))
++                    sigma = max(float(addition_cfg.get("sigma", target_x)), 1.0e-6)
++                    _, _, wheel_pos_heading_b, _, _ = env._get_root_quat_inv_and_wheel_pos_b()
++                    wheel_x_min = wheel_pos_heading_b[:, :, 0].min(dim=1).values
++                    deficit = torch.clamp(target_x - wheel_x_min, min=0.0)
++                    added_reward = reward_mask.float() * torch.exp(-deficit / sigma)
++                elif addition_type == "wheel_zero_torque_exp":
++                    wheel_idx = getattr(env, "_wheel_idx", [])
++                    if len(wheel_idx) == 0:
++                        added_reward = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
++                    else:
++                        reward_mask_f = self._get_reward_window_mask(env, addition_cfg).float()
++                        sigma = max(float(addition_cfg.get("sigma", 1.5)), 1.0e-6)
++                        wheel_torque = env.robot.data.applied_torque[:, wheel_idx]
++                        max_wheel_torque = torch.abs(wheel_torque).max(dim=1).values
++                        added_reward = reward_mask_f * torch.exp(
++                            -torch.square(max_wheel_torque / sigma)
++                        )
++                elif addition_type == "wheel_directional_speed":
++                    speed_score, _ = self._get_directional_wheel_speed_score(env, addition_cfg)
++                    added_reward = speed_score
++                elif addition_type == "wheel_directional_speed_shortfall":
++                    speed_score, gate_f = self._get_directional_wheel_speed_score(env, addition_cfg)
++                    added_reward = gate_f * (1.0 - speed_score)
++                elif addition_type == "landing_traj_height_exp":
++                    self._ensure_landing_trajectory_buffers(env)
++                    active_f = env.airborne_landing_traj_active.float()
++                    sigma = max(float(addition_cfg.get("sigma", 0.01)), 1.0e-6)
++                    h_ref, _ = self._get_landing_trajectory_reference(env)
++                    height = self._get_body_relative_ground_height(env)
++                    added_reward = active_f * torch.exp(-torch.square(height - h_ref) / sigma)
++                elif addition_type == "landing_traj_vel_z_exp":
++                    self._ensure_landing_trajectory_buffers(env)
++                    active_f = env.airborne_landing_traj_active.float()
++                    sigma = max(float(addition_cfg.get("sigma", 0.25)), 1.0e-6)
++                    _, v_ref = self._get_landing_trajectory_reference(env)
++                    vel_z = env.robot.data.root_lin_vel_w[:, 2]
++                    added_reward = active_f * torch.exp(-torch.square(vel_z - v_ref) / sigma)
+                 elif addition_type == "negative_lin_vel_z_after_wheel_contact":
+                     wheel_exit_time = getattr(env, "airborne_wheel_contact_exit_time", None)
+                     if wheel_exit_time is None:
+@@ -924,6 +1295,11 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+         extras["Episode/HeightReward/AirborneBaseExitContactRatio"] = (
+             (env.airborne_base_contact_exit_time[env_ids] > 0.0).float().mean().item()
+         )
++        landing_traj_active = getattr(env, "airborne_landing_traj_active", None)
++        if landing_traj_active is not None:
++            extras["Episode/HeightReward/AirborneLandingTrajRatio"] = (
++                landing_traj_active[env_ids].float().mean().item()
++            )
+         airborne_max_duration = getattr(env, "airborne_max_duration", None)
+         if airborne_max_duration is not None:
+             episode_airborne_max_duration = airborne_max_duration[env_ids]
+@@ -980,3 +1356,4 @@ class AirborneStateMachine(WheelbipeStateMachineBase):
+             env.airborne_command_override_active[env_ids] = False
+             env.airborne_command_override_values[env_ids] = 0.0
+             env.airborne_command_override_field_mask[env_ids] = False
++        self._clear_landing_trajectory(env, env_ids)
+diff --git a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py
+index b0b481c..1262a6b 100644
+--- a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py
++++ b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe25_v3/env.py
+@@ -2716,6 +2716,7 @@ class Wheelbipe25V3Env(DirectRLEnv):
+         return torch.clamp(costs, min=0.0, max=cost_clip)
+ 
+     def _get_observations(self) -> dict:
++        # print(self.robot.data.root_ang_vel_b.clone()[0,2])
+         self._maybe_print_wheel_material_debug()
+         # prepare observations
+         # 更新地面高度估计
+@@ -3344,6 +3345,10 @@ class Wheelbipe25V3Env(DirectRLEnv):
+             * stand_still_lin_mask.float()
+             + torch.square(self.robot.data.root_ang_vel_b[:, 2]) * stand_still_yaw_mask.float()
+         )
++        rew_stand_still_lin_vel = (
++            torch.sum(torch.abs(self.robot.data.root_lin_vel_b[:, :2]), dim=1)
++            * stand_still_lin_mask.float()
++        )
+ 
+         # 约束加减速足端位置
+         # foot_bound_square = torch.square(wheel_pos_heading_b[:,:,0])
+@@ -3906,6 +3911,8 @@ class Wheelbipe25V3Env(DirectRLEnv):
+ 
+     @staticmethod
+     def _get_scale_alias(scale_cfg: Mapping, aliases: tuple[str, ...], default: float = 1.0) -> float:
++        if isinstance(aliases, str):
++            aliases = (aliases,)
+         for alias in aliases:
+             if alias in scale_cfg:
+                 return float(scale_cfg[alias])
+diff --git a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py
+index aa239e9..d6c77a0 100644
+--- a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py
++++ b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/cfg_utils.py
+@@ -103,7 +103,7 @@ V14_BASIC_OBS_SCALE: dict = {
+     "command": {
+         "lin_vel_x": 1.0,
+         "lin_vel_y": 1.0,
+-        "ang_vel_z": 0.5,
++        "ang_vel_z": 1.0,
+     },
+     "height_cmd": 5.0,
+     "root_ang_vel_b": 0.5,
+@@ -485,17 +485,7 @@ V14_ROUGH_TERRAIN_COMMAND_OVERRIDES: dict[str, TerrainCommandOverrideCfg] = {
+     #     ang_vel_z_non_heading=(-0.01, 0.01),
+     #     reset_heading_axis_aligned_only=True,
+     # ),
+-    # "high_stair_for_rm": TerrainCommandOverrideCfg(
+-    #     height_range=[(0.22, 0.34)],
+-    #     lin_vel_x=[(1.5, 2.7), (-2.7, -1.5)],
+-    #     lin_vel_y=(0.0, 0.0),
+-    #     ang_vel_z_heading=(-1, 1),
+-    #     ang_vel_z_non_heading=(-0.1, 0.1),
+-    #     reset_heading_axis_aligned_only=True,
+-    #     disable_predefined_reset_air = True,
+-    #     disable_special_mode=True,
+-    # ),
+-    "high_speed_stair_for_rm": TerrainCommandOverrideCfg(
++    "high_stair_for_rm": TerrainCommandOverrideCfg(
+         height_range=[(0.22, 0.34)],
+         lin_vel_x=[(1.5, 2.7), (-2.7, -1.5)],
+         lin_vel_y=(0.0, 0.0),
+@@ -505,12 +495,22 @@ V14_ROUGH_TERRAIN_COMMAND_OVERRIDES: dict[str, TerrainCommandOverrideCfg] = {
+         disable_predefined_reset_air = True,
+         disable_special_mode=True,
+     ),
++    "high_speed_stair_for_rm": TerrainCommandOverrideCfg(
++        height_range=[(0.22, 0.34)],
++        lin_vel_x=[(1.5, 2.7), (-2.7, -1.5)],
++        lin_vel_y=(0.0, 0.0),
++        # ang_vel_z_heading=(-1, 1),
++        ang_vel_z_non_heading=(-0.1, 0.1),
++        reset_heading_axis_aligned_only=True,
++        disable_predefined_reset_air = True,
++        disable_special_mode=True,
++    ),
+     "low_speed_stair_for_rm": TerrainCommandOverrideCfg(
+         height_range=[(0.22, 0.34)],
+         # lin_vel_x=[(2.0, 3.0), (-3.0, -2.0)],
+         lin_vel_x=[(0.5, 1.5), (-1.5, -0.5)],
+         lin_vel_y=(0.0, 0.0),
+-        ang_vel_z_heading=(-1, 1),
++        # ang_vel_z_heading=(-1, 1),
+         ang_vel_z_non_heading=(-0.1, 0.1),
+         reset_heading_axis_aligned_only=True,
+         disable_predefined_reset_air = True,
+@@ -575,16 +575,16 @@ V14_ROUGH_TERRAIN_COMMAND_OVERRIDES: dict[str, TerrainCommandOverrideCfg] = {
+     #     disable_predefined_reset_air = True,
+     #     disable_special_mode=True,
+     # ),
+-    # "cliff_inv_stair_slope_short_for_rm": TerrainCommandOverrideCfg(
+-    #     height_range=[(0.24, 0.32)],
+-    #     lin_vel_x=[(2.0, 2.7), (-2.7, -2.0)],
+-    #     lin_vel_y=(0.0, 0.0),
+-    #     # ang_vel_z_heading=(-1, 1),
+-    #     ang_vel_z_non_heading=(-0.1, 0.1),
+-    #     reset_heading_axis_aligned_only=True,
+-    #     disable_predefined_reset_air = True,
+-    #     disable_special_mode=True,
+-    # ),
++    "cliff_inv_stair_slope_short_for_rm": TerrainCommandOverrideCfg(
++        height_range=[(0.24, 0.32)],
++        lin_vel_x=[(2.0, 2.7), (-2.7, -2.0)],
++        lin_vel_y=(0.0, 0.0),
++        # ang_vel_z_heading=(-1, 1),
++        ang_vel_z_non_heading=(-0.1, 0.1),
++        reset_heading_axis_aligned_only=True,
++        disable_predefined_reset_air = True,
++        disable_special_mode=True,
++    ),
+     # "cliff_inv_stair_slope_long_for_rm": TerrainCommandOverrideCfg(
+     #     height_range=[(0.28, 0.35)],
+     #     lin_vel_x=[(2.0, 2.5), (-2.5, -2.0)],
+@@ -643,7 +643,7 @@ V14_ROUGH_TERRAIN_COMMAND_OVERRIDES: dict[str, TerrainCommandOverrideCfg] = {
+         height_range=[(0.22, 0.42)],
+     ),
+     'tiny_step': TerrainCommandOverrideCfg(
+-        height_range=[(0.22, 0.42)],
++        height_range=[(0.22, 0.32)],
+         disable_predefined_reset_air = True,
+     )
+ }
+@@ -903,6 +903,7 @@ V14_ROUGH_NP3O_BARLOW_PLUS_PRIV_REWARDS = OrderedDict(
+     track_lin_vel_xy_square=-5.0,
+     track_ang_vel_z=1.0,
+     track_ang_vel_z_square=-0.5,
++    stand_still_lin_vel=-2.0,
+     stand_still=-0.0,
+     track_height_exp=0.4,
+     track_height_exp_soft=0.2,
+@@ -989,6 +990,7 @@ V14_MOOD_MT_RECOVER_REWARDS = OrderedDict(
+     track_lin_vel_xy_square=-5.0,
+     track_ang_vel_z=0.0,
+     track_ang_vel_z_square=-1.0,
++    # stand_still_lin_vel=-1.0,
+     # stand_still=-1.0,
+     no_fork_exp=-1.0,
+     no_fork_z_exp=-1.0,
+@@ -1031,6 +1033,7 @@ V14_MOOD_MT_NORMAL_REWARDS = OrderedDict(
+     track_lin_vel_xy_square=-1.0,
+     track_ang_vel_z=1.0,
+     track_ang_vel_z_square=-0.5,
++    stand_still_lin_vel=-2.0,
+     stand_still=-2.0,
+     track_height_exp=0.4,
+     track_height_exp_soft=0.0,
+@@ -1076,6 +1079,7 @@ V14_MOOD_MT_JUMP_REWARDS = OrderedDict(
+     track_lin_vel_xy_square=-1.0,
+     track_ang_vel_z=0.1,
+     track_ang_vel_z_square=-0.5,
++    # stand_still_lin_vel=-0.0,
+     # stand_still=-0.0,
+     track_height_exp=0.6,
+     track_height_exp_soft=1.0,
+@@ -1137,6 +1141,7 @@ V14_MOOD_MT_JUMP_TEST_REWARDS = OrderedDict(
+     track_lin_vel_xy_square=-1.0,
+     track_ang_vel_z=0.1,
+     track_ang_vel_z_square=-0.5,
++    # stand_still_lin_vel=-0.0,
+     # stand_still=-0.0,
+     track_height_exp=0.6,
+     track_height_exp_soft=1.0,
+diff --git a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py
+index 1c32203..e1d8d9b 100644
+--- a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py
++++ b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_cfg.py
+@@ -28,7 +28,7 @@ class EventCfgV14(EventCfg):
+         mode="startup",
+         params={
+             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+-            "mass_distribution_params": (0.9, 1.3),
++            "mass_distribution_params": (1.0, 1.4),
+             "operation": "scale",
+         },
+     )
+@@ -669,7 +669,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+     )
+ 
+     use_leg_length_as_height = False
+-    height_range = [0.18, 0.43]
++    height_range = [0.20, 0.42]
+     terrain_command_overrides: dict[str, TerrainCommandOverrideCfg] = field(default_factory=dict)
+     terrain_command_switch_hold_steps: int = 0
+     use_absolute_height = True
+@@ -733,7 +733,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+         "enter": {
+             "wheel_radius": 0.06,
+             "body_height_threshold": 0.3,
+-            "wheel_clearance_threshold": 0.04,
++            "wheel_clearance_threshold": 0.08,
+             "duration_s": 0.02,
+         },
+         "target_height": {
+@@ -743,6 +743,22 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+             "bias": 0.12,
+             "max": 0.36,
+         },
++        "landing_trajectory": {
++            "enabled": False,
++            # 任一轮接触计时达到该阈值后，若还在下落，则初始化一次落地缓冲轨迹。
++            "start_wheel_contact_duration_s": 0.02,
++            # 固定时长结束时的参考高度；若触发起点低于 target_height + min_height_margin，则不规划。
++            "target_height": 0.22,
++            # 固定时长结束时的参考 z 速度，默认 0，且不会允许配置为正值。
++            "end_vel_z": 0.0,
++            "min_height_margin": 0.02,
++            # 只有 z 方向速度小于 -min_down_vel 时才触发，避免轻微噪声启动轨迹。
++            "min_down_vel": 0.2,
++            # 固定二次轨迹总时长；到 duration_s 时刚好到达终点高度和终点速度。
++            "duration_s": 0.3,
++            # 可选加速度上限；若二次轨迹所需常加速度超过该值，则不启动本次轨迹。
++            "max_abs_acc": 30.0,
++        },
+         "exit": {
+             "wheel_contact_force_threshold": 20.0,
+             "wheel_contact_height_threshold": 0.15,
+@@ -768,17 +784,17 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+             "enabled": False,
+             # 进入 airborne 时按概率决定是否启用本次 airborne 临时速度命令覆盖。
+             # profiles 的 key 默认就是地形名；也可在 profile 内用 terrain_names 指定多个地形。
+-            "prob": 0.5,
++            "prob": 0.15,
+             # True 时，lin_vel_x 重采样符号跟当前目标速度保持一致：
+             # 当前目标为正则只采样 >=0，为负则只采样 <=0。
+             "lin_vel_x_sign_from_current": True,
+             "profiles": {
+-                # "high_stair_for_rm": {
+-                #     "lin_vel_x": [(-1.5, 1.5)],
+-                #     # "lin_vel_x": [(-0., 0.)],
+-                #     "lin_vel_y": (0.0, 0.0),
+-                #     "ang_vel_z": (-1.0, 1.0),
+-                # },
++                "high_stair_for_rm": {
++                    "lin_vel_x": [(-1.5, 1.5)],
++                    # "lin_vel_x": [(-0., 0.)],
++                    "lin_vel_y": (0.0, 0.0),
++                    "ang_vel_z": (-1.0, 1.0),
++                },
+                 "high_speed_stair_for_rm": {
+                     "lin_vel_x": [(-1.5, 1.5)],
+                     # "lin_vel_x": [(-0., 0.)],
+@@ -1023,7 +1039,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+     height_upright_gate_enabled: bool = False
+     height_upright_gate_sigma: float = 0.1
+     stand_still_deadzone_enabled: bool = False
+-    stand_still_deadzone_threshold: float = 0.2
++    stand_still_deadzone_threshold: float = 0.1
+     wheel_motor_z_axis_align_ref_y_offset: float = 0.20855
+     wheel_motor_z_axis_align_tolerance: float = 0.0
+     wheel_motor_z_axis_align_sigma: float = 0.01
+@@ -1184,6 +1200,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+         track_lin_vel_xy_square=-1.0,
+         track_ang_vel_z=1.0,
+         track_ang_vel_z_square=-1.0,
++        # stand_still_lin_vel=-2.0,
+         # stand_still=-2.0,
+         stand_still=-0.0,
+         track_height_exp=0.0,
+@@ -1294,7 +1311,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+             ranges=mdp.SpecialModeUniformVelocityCommandCfg.Ranges(
+                 lin_vel_x=(-2.7, 2.7),
+                 lin_vel_y=(0.0, 0.0),
+-                ang_vel_z=(-1.5*torch.pi, 1.5*torch.pi),
++                ang_vel_z=(-2.*torch.pi, 2.*torch.pi),
+                 heading=(-torch.pi, torch.pi),
+             ),
+             special_modes={
+@@ -1344,7 +1361,7 @@ class WheelbipeV14FlatEnvCfg(Wheelbipe25v3FlatEnvCfg):
+                     ranges=mdp.SpecialModeEntryCfg.Ranges(
+                         lin_vel_x=[(2.0, 3.0), (-3.0, -2.0)],  # 多区间：向前或向后高速
+                         lin_vel_y=(0.0, 0.0),
+-                        ang_vel_z=[(0.0*torch.pi, 2.0*torch.pi),(-2.0*torch.pi, -0.0*torch.pi)],
++                        ang_vel_z=[(-2.*torch.pi, 2.*torch.pi)],
+                     ),
+                 ),
+             },
+@@ -1519,6 +1536,19 @@ class WheelbipeV14FlatEnvCfg_v1(WheelbipeV14FlatEnvCfg):
+         self.commands.special_modes['spin_low'].iteration_start = 0
+         self.commands.special_modes['spin_mid'].iteration_start = 0
+         self.commands.special_modes['dash'].iteration_start = 0
++        self.commands.special_modes['dash'].rel_envs = 0.2
++        self.commands.special_modes["zero_cmd"] = mdp.SpecialModeEntryCfg(
++            rel_envs=0.1,
++            iteration_start=0,
++            iteration_end=-1,
++            disable_jump_takeoff=True,
++            debug_print=False,
++            ranges=mdp.SpecialModeEntryCfg.Ranges(
++                lin_vel_x=(0.0, 0.0),
++                lin_vel_y=(0.0, 0.0),
++                ang_vel_z=(0.0, 0.0),
++            ),
++        )
+         self.predefined_reset_ground["modes"]["positive"]["prob"] = 0.2
+         self.predefined_reset_ground["modes"]["negative"]["prob"] = 0.1
+         reward_scales = dict(self.airborne_state_machine_cfg.get("reward_scales", {}))
+@@ -1992,6 +2022,7 @@ class WheelbipeV14RoughEnvCfg_v1(WheelbipeV14FlatEnvCfg_v1):
+     def __post_init__(self):
+         super().__post_init__()
+         # self.predefined_reset_ground['prob'] = 0.3
++        # self.predefined_reset_air['enable'] = False
+         _apply_v14_rough_runtime_cfg(self)
+         self.airborne_state_machine_cfg = copy.deepcopy(self.airborne_state_machine_cfg)
+         terrain_command_resample = copy.deepcopy(
+@@ -2000,21 +2031,103 @@ class WheelbipeV14RoughEnvCfg_v1(WheelbipeV14FlatEnvCfg_v1):
+         terrain_command_resample["enabled"] = True
+         terrain_command_resample["lin_vel_x_sign_from_current"] = True
+         self.airborne_state_machine_cfg["terrain_command_resample"] = terrain_command_resample
++        landing_trajectory = copy.deepcopy(
++            self.airborne_state_machine_cfg.get("landing_trajectory", {})
++        )
++        landing_trajectory.update(
++            {
++                "enabled": False,
++                "start_wheel_contact_duration_s": 0.02,
++                "target_height": 0.24,
++                "end_vel_z": 0.0,
++                "min_height_margin": 0.02,
++                "min_down_vel": 0.2,
++                "duration_s": 0.3,
++                "max_abs_acc": 30.0,
++            }
++        )
++        self.airborne_state_machine_cfg["landing_trajectory"] = landing_trajectory
+         reward_additions = dict(self.airborne_state_machine_cfg.get("reward_additions", {}))
+         reward_additions["airborne_wheel_contact_force_over"] = {
+             "type": "wheel_contact_force_over",
+-            "force_threshold": 280.0,
++            "force_threshold": 300.0,
+             "mode": "l1",
+             "reduce": "sum",
+         }
++        reward_additions["airborne_landing_wheel_body_x_positive"] = {
++            "type": "landing_wheel_body_x_positive",
++            "target_x": 0.03,
++            "sigma": 0.03,
++            "command_x_min": 1.0,
++            "start_wheel_contact_duration_s": 0.02,
++            "contact_force_threshold": 1.0,
++            "contact_mode": "any_wheel",
++            "use_entry_command": True,
++        }
++        reward_additions["airborne_air_wheel_zero_torque_exp"] = {
++            "type": "wheel_zero_torque_exp",
++            "sigma": 1.5,
++            "before_wheel_contact_duration_s": 0.02,
++            "contact_mode": "any_wheel",
++        }
++        reward_additions["airborne_precontact_wheel_directional_speed"] = {
++            "type": "wheel_directional_speed",
++            "start": 0.0,
++            "full": 10.0,
++            "command_x_threshold": 1.0,
++            "root_x_threshold": 1.0,
++            "reduce": "min",
++            "before_wheel_contact_duration_s": 0.02,
++            "contact_mode": "any_wheel",
++        }
++        reward_additions["airborne_precontact_wheel_directional_speed_shortfall"] = {
++            "type": "wheel_directional_speed_shortfall",
++            "start": 0.0,
++            "full": 10.0,
++            "command_x_threshold": 1.0,
++            "root_x_threshold": 1.0,
++            "reduce": "min",
++            "require_wheel_contact_timer_started": True,
++            "before_wheel_contact_duration_s": 0.05,
++            "contact_mode": "any_wheel",
++        }
++        reward_additions["airborne_landing_wheel_max_contact_force"] = {
++            "type": "landing_wheel_max_contact_force",
++            "force_start": 200.0,
++            "force_full": 400.0,
++            "start_wheel_contact_duration_s": 0.02,
++            "contact_force_threshold": 1.0,
++            "contact_mode": "any_wheel",
++        }
++        reward_additions["airborne_landing_traj_height"] = {
++            "type": "landing_traj_height_exp",
++            "sigma": 0.01,
++        }
++        reward_additions["airborne_landing_traj_vel_z"] = {
++            "type": "landing_traj_vel_z_exp",
++            "sigma": 0.25,
++        }
+         self.airborne_state_machine_cfg["reward_additions"] = reward_additions
+         # self.rewards['undesired_contact'] = -10.
+         # self.rewards['track_lin_vel_xy_tight'] = 1.0
+         self.rewards['wheel_power'] = -1e-5
+         self.rewards['joint_torque'] = -1e-5
+         self.rewards['track_lin_vel_xy'] = 1.25
+-        self.rewards['track_ang_vel_z'] = 1.0
+-        # self.rewards["airborne_wheel_contact_force_over"] = -10.
++        # self.rewards['track_lin_vel_xy_square'] = -0.1
++        # self.rewards['track_ang_vel_z'] = 5.0
++        # self.rewards['track_ang_vel_z_square'] = -0.1
++        # self.rewards["airborne_wheel_contact_force_over"] = -0.1
++        # self.rewards["airborne_landing_wheel_body_x_positive"] = 5.0
++
++        self.rewards["airborne_air_wheel_zero_torque_exp"] = 20.0
++        self.rewards["airborne_precontact_wheel_directional_speed"] = 10.0
++        self.rewards["airborne_precontact_wheel_directional_speed_shortfall"] = -10.0
++        self.rewards["airborne_landing_wheel_max_contact_force"] = -10.0
++
++        # self.rewards["airborne_landing_traj_height"] = 20.0
++        # self.rewards["action_smoothness_wheel"] = -0.0025
++        # self.rewards["action_smoothness_leg"] = -0.02
++        # self.rewards["airborne_landing_traj_vel_z"] = 2.0
+         # self.rewards['flat_orientation_x_exp'] = 0.5
+         # self.rewards['flat_orientation_y_exp'] = 0.5
+         # reward_scales = dict(self.airborne_state_machine_cfg.get("reward_scales", {}))
+@@ -2097,7 +2210,7 @@ class WheelbipeV14RoughEnvCfg_v2(WheelbipeV14RoughEnvCfg_v1):
+         self.rewards["stair_wheel_xy_contact_force"] = -0.
+ 
+ @configclass
+-class WheelbipeV14FlatEnvCfg_Play(WheelbipeV14FlatEnvCfg_v1):
++class WheelbipeV14FlatEnvCfg_Play(WheelbipeV14FlatEnvCfg):
+     events = EventCfgV14_Play()
+     curriculum = None
+     use_frame_stack = False
+@@ -2107,12 +2220,12 @@ class WheelbipeV14FlatEnvCfg_Play(WheelbipeV14FlatEnvCfg_v1):
+     def __post_init__(self):
+         super().__post_init__()
+         # self.episode_length_s = 2.0
+-        self.episode_length_s = 2.0
+-        self.height_range = [0.2, 0.4]
++        self.episode_length_s = 10.0
++        self.height_range = [0.2, 0.2]
+         self.predefined_reset_ground["modes"]["positive"]["prob"] = 0.
+         self.predefined_reset_ground["modes"]["negative"]["prob"] = 0.
+         self.predefined_reset_air = {
+-            "enabled": True,
++            "enabled": False,
+             "modes": (
+                 {
+                     "name": "play_air",
+@@ -2156,15 +2269,15 @@ class WheelbipeV14FlatEnvCfg_Play(WheelbipeV14FlatEnvCfg_v1):
+         self.commands = mdp.UniformVelocityCommandCfg(
+             asset_name="robot",
+             resampling_time_range=(5, 10),
+-            rel_standing_envs=0.1,
++            rel_standing_envs=0.,
+             rel_heading_envs=0.,
+-            heading_command=True,
++            heading_command=False,
+             heading_control_stiffness=1.0,
+             debug_vis=True,
+             ranges=mdp.UniformVelocityCommandCfg.Ranges(
+-                lin_vel_x=(-2.5, 2.5),
++                lin_vel_x=(-0.0, 0.0),
+                 lin_vel_y=(0.0, 0.0),
+-                ang_vel_z=(-1.*torch.pi, 1.*torch.pi),
++                ang_vel_z=(3.*torch.pi, 3.*torch.pi),
+                 heading=(-torch.pi, torch.pi),
+             ),
+         )
+@@ -2452,6 +2565,7 @@ class WheelbipeV14MoodMuCEnvCfg(WheelbipeV14MoodFlatEnvCfg):
+         "track_lin_vel_xy_square": "task",
+         "track_ang_vel_z": "task",
+         "track_ang_vel_z_square": "task",
++        "stand_still_lin_vel": "task",
+         "stand_still": "task",
+         "track_height_exp": "task",
+         "track_height_exp_soft": "task",
+@@ -2531,6 +2645,7 @@ class WheelbipeV14MoodMTFlatEnvCfg(WheelbipeV14MoodFlatEnvCfg):
+         "track_lin_vel_xy_square",
+         "track_ang_vel_z",
+         "track_ang_vel_z_square",
++        "stand_still_lin_vel",
+         "stand_still",
+         "no_fork_exp",
+         "no_fork_z_exp",
+@@ -2755,6 +2870,7 @@ class WheelbipeV14MoodMTFlatEnvCfg_Play(WheelbipeV14FlatEnvCfg_Play):
+         "track_lin_vel_xy_square",
+         "track_ang_vel_z",
+         "track_ang_vel_z_square",
++        "stand_still_lin_vel",
+         "stand_still",
+         "no_fork_exp",
+         "no_fork_z_exp",
+diff --git a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_mood_multitask.py b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_mood_multitask.py
+index 3e37457..d44ebbb 100644
+--- a/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_mood_multitask.py
++++ b/source/agent_tasks/agent_tasks/direct/wheelbipe/wheelbipe_V14/env_mood_multitask.py
+@@ -971,6 +971,10 @@ class WheelbipeV14MoodMultiTaskEnv(WheelbipeV14MoodEnv):
+             * stand_still_lin_mask.float()
+             + torch.square(self.robot.data.root_ang_vel_b[:, 2]) * stand_still_yaw_mask.float()
+         )
++        stand_still_lin_vel = (
++            torch.sum(torch.abs(self.robot.data.root_lin_vel_b[:, :2]), dim=1)
++            * stand_still_lin_mask.float()
++        )
+ 
+         undesired_threshold = float(getattr(self.cfg, "undesired_contact_force_threshold", 5.0))
+         if net_contact_forces is not None:
+@@ -1039,6 +1043,7 @@ class WheelbipeV14MoodMultiTaskEnv(WheelbipeV14MoodEnv):
+             "track_ang_vel_z": track_ang_vel_z,
+             "track_ang_vel_z_square": track_ang_vel_z_square,
+             "stand_still": stand_still,
++            "stand_still_lin_vel": stand_still_lin_vel,
+             "no_fork_exp": no_fork_exp,
+             "no_fork_z_exp": no_fork_z_exp,
+             "undesired_contact": undesired_contact,
+diff --git a/source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py b/source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py
+index cd74ca1..d41bbb4 100644
+--- a/source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py
++++ b/source/agent_tasks/agent_tasks/manager/mdp/isaaclab/terrains.py
+@@ -75,8 +75,8 @@ WAVE_FOR_RM = terrain_gen.HfWaveTerrainCfg(
+ 
+ RANDOM_UNIFORM_FOR_RM = terrain_gen.HfRandomUniformTerrainCfg( # 随机均匀地形
+             proportion=0.1, # 出现概率
+-            noise_range=(0.0, 0.05), # 最低和最高
+-            noise_step=0.005, # 两点之间最低高度变化
++            noise_range=(0.0, 0.03), # 最低和最高
++            noise_step=0.005, # 两点之间最低高度变化，不能小于 terrain vertical_scale
+             downsampled_scale=0.2, # 两点之间最近距离， None则采用horizontal_scale
+             border_width=1., # 环绕地形的平地距离
+         )
+@@ -258,8 +258,8 @@ RMUC2026_FLY_SLOPE_USD_TERRAIN_CFG = TerrainImporterCfg(
+ )
+ 
+ HIGH_STAIR_FOR_RM = terrain_gen.HfPyramidStairsTerrainCfg(
+-    proportion=0.2,
+-    step_height_range=(0.15, 0.45), 
++    proportion=0.1,
++    step_height_range=(0.15, 0.35), 
+     step_width=1.25,        # 台阶宽度变得不重要
+     platform_width=2.5,    # 几乎占满整个 7m 空间（扣除 border）
+     border_width=0.,
+@@ -274,8 +274,8 @@ LOW_SPEED_STAIR_FOR_RM = terrain_gen.HfPyramidStairsTerrainCfg(
+ )
+ 
+ HIGH_SPEED_STAIR_FOR_RM = terrain_gen.HfPyramidStairsTerrainCfg(
+-    proportion=0.2,
+-    step_height_range=(0.15, 0.45), 
++    proportion=0.1,
++    step_height_range=(0.15, 0.40), 
+     step_width=1.5,        # 台阶宽度变得不重要
+     platform_width=3.0,    # 几乎占满整个 7m 空间（扣除 border）
+     border_width=0.,
+@@ -460,7 +460,7 @@ RM_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+     border_width=10.0, # 每一块地形环绕的分隔距离
+     border_height=1.0, # 每一块地形边缘的维兰高度，正数，围栏在ground下面，负数，围栏在ground上面
+     num_rows=10, # 子地形的行数
+-    num_cols=15, # 子地形的列数
++    num_cols=13, # 子地形的列数
+     color_scheme='none', # 地形颜色，'height'颜色根据地形的高度变化，'random'颜色随机，'none'没有颜色
+     horizontal_scale=0.1, # 每一小块地形采样的长宽
+     vertical_scale=0.005, # 每一小块地形的高度变化
+@@ -472,14 +472,14 @@ RM_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         'low_speed_stair_for_rm': LOW_SPEED_STAIR_FOR_RM,
+         'tiny_step': TINY_STEP_FOR_RM,
+         # 'inv_stair_for_rm': INV_STAIR_FOR_RM,
+-        'slope_for_rm_low': SLOPE_FOR_RM_LOW,
++        # 'slope_for_rm_low': SLOPE_FOR_RM_LOW,
+         'slope_for_rm_high': SLOPE_FOR_RM_HIGH,
+         'inv_slope_for_rm_low': INV_SLOPE_FOR_RM_LOW,
+         # 'inv_slope_for_rm_high': INV_SLOPE_FOR_RM_HIGH,
+         # 'stair_for_rm': STAIR_FOR_RM,
+         # 'high_stair_for_rm': HIGH_STAIR_FOR_RM,
+         'high_speed_stair_for_rm' : HIGH_SPEED_STAIR_FOR_RM,
+-        'stair_slope_for_rm_low': STAIR_SLOPE_FOR_RM_LOW,
++        # 'stair_slope_for_rm_low': STAIR_SLOPE_FOR_RM_LOW,
+         'stair_slope_for_rm_high': STAIR_SLOPE_FOR_RM_HIGH,
+         'inv_stair_slope_for_rm_low': INV_STAIR_SLOPE_FOR_RM_LOW,
+         'inv_stair_slope_for_rm_high': INV_STAIR_SLOPE_FOR_RM_HIGH,
+@@ -487,7 +487,7 @@ RM_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         # 'cliff_inv_stair_slope_for_rm': CLIFF_INV_STAIR_SLOPE_FOR_RM,
+         'random_uniform_for_rm': RANDOM_UNIFORM_FOR_RM,
+         # 'cliff_inv_stair_slope_tall_for_rm': CLIFF_INV_STAIR_SLOPE_TALL_FOR_RM,
+-        # 'cliff_inv_stair_slope_short_for_rm': CLIFF_INV_STAIR_SLOPE_SHORT_FOR_RM,
++        'cliff_inv_stair_slope_short_for_rm': CLIFF_INV_STAIR_SLOPE_SHORT_FOR_RM,
+         # 'cliff_inv_stair_slope_long_for_rm': CLIFF_INV_STAIR_SLOPE_LONG_FOR_RM,
+     },
+ )

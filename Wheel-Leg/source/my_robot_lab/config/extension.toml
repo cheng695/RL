@@ -1,0 +1,22 @@
+[package]
+
+version = "0.1.0"
+title = "My Robot Lab"
+description = "Isaac Lab extension for UZ-05 wheel-legged locomotion tasks."
+readme = "docs/README.md"
+repository = ""
+category = "robotics"
+keywords = ["robotics", "isaaclab", "rl", "locomotion", "wheel-legged"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_tasks" = {}
+"isaaclab_rl" = {}
+"isaacsim.asset.importer.mjcf" = {}
+
+[core]
+reloadable = false
+
+[[python.module]]
+name = "my_robot_lab"

@@ -43,6 +43,13 @@ wandb/
 *.onnx
 *.jit
 
+# Diagnostic outputs
+*.csv
+base_height_trace*.png
+com_height_diagnosis*.png
+virtual_leg_calibration*.json
+point_geometry_validation*.json
+
 # Local environment
 .env
 .venv/

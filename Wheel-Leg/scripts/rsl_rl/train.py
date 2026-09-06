@@ -1,4 +1,4 @@
-"""Train WheelLeg tasks with RSL-RL."""
+"""Train UZ-05 velocity tasks with RSL-RL."""
 
 from __future__ import annotations
 
@@ -11,15 +11,16 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+EXTENSION_SOURCE = PROJECT_ROOT / "source" / "my_robot_lab"
+if str(EXTENSION_SOURCE) not in sys.path:
+    sys.path.insert(0, str(EXTENSION_SOURCE))
 
 from isaaclab.app import AppLauncher
 
 import cli_args
 
-parser = argparse.ArgumentParser(description="Train a WheelLeg task with RSL-RL.")
-parser.add_argument("--task", type=str, default="WheelLeg-v0", help="Gym task name.")
+parser = argparse.ArgumentParser(description="Train a UZ-05 velocity task with RSL-RL.")
+parser.add_argument("--task", type=str, default="MyRobot-Velocity-Flat-v0", help="Gym task name.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments.")
 parser.add_argument("--seed", type=int, default=None, help="Random seed. Use -1 for a random seed.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Override PPO training iterations.")
@@ -32,6 +33,7 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import torch
+from isaacsim.core.utils.extensions import enable_extension
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.utils.io import dump_yaml
@@ -39,7 +41,9 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
-import envs.wheel_leg  # noqa: F401
+import my_robot_lab  # noqa: F401
+
+enable_extension("isaacsim.asset.importer.mjcf")
 
 
 def main() -> None:
@@ -79,6 +83,7 @@ def main() -> None:
     env = gym.make(args_cli.task, cfg=env_cfg)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    runner.add_git_repo_to_log(__file__)
 
     if resume_path is not None:
         print(f"[INFO] Loading checkpoint: {resume_path}")

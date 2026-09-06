@@ -10,11 +10,13 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.sensors import RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
+    ActionsCfg as IsaacLabActionsCfg,
     CommandsCfg as IsaacLabCommandsCfg,
     CurriculumCfg as IsaacLabCurriculumCfg,
     EventCfg as IsaacLabEventCfg,
@@ -24,6 +26,19 @@ from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
     TerminationsCfg as IsaacLabTerminationsCfg,
 )
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import MySceneCfg as IsaacLabVelocitySceneCfg
+from my_robot_lab.assets.robots.my_robot_ import (
+    BASE_CONTACT_BODY_NAMES,
+    BASE_BODY_NAME,
+    CONTROLLED_JOINTS,
+    INITIAL_BASE_HEIGHT_RANGE,
+    LEG_EXTENSION_BODY_NAMES,
+    LEG_JOINTS,
+    WHEEL_JOINTS,
+)
+from my_robot_lab.tasks.manager_based.locomotion.velocity.mdp import commands as my_commands
+from my_robot_lab.tasks.manager_based.locomotion.velocity.mdp import observations as my_observations
+from my_robot_lab.tasks.manager_based.locomotion.velocity.mdp import rewards as my_rewards
+from my_robot_lab.tasks.manager_based.locomotion.velocity.mdp import terminations as my_terminations
 
 @configclass
 class MySceneCfg(IsaacLabVelocitySceneCfg):
@@ -47,6 +62,16 @@ class MySceneCfg(IsaacLabVelocitySceneCfg):
     # robots
     robot: ArticulationCfg = MISSING
 
+    # sensors
+    height_scanner = RayCasterCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{BASE_BODY_NAME}",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+    )
+
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -69,9 +94,38 @@ class CommandsCfg(IsaacLabCommandsCfg):
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
             lin_vel_y=(0.0, 0.0),
-            ang_vel_z=(-1.0, 1.0),
+            ang_vel_z=(-2.0, 2.0),
             heading=(-math.pi, math.pi),
         ),
+    )
+
+    base_height = my_commands.UniformBaseHeightCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(1.0e9, 1.0e9),
+        height_range=INITIAL_BASE_HEIGHT_RANGE,
+    )
+
+
+@configclass
+class ActionsCfg(IsaacLabActionsCfg):
+    """Action specifications for the wheel-leg robot."""
+
+    joint_pos = None
+
+    leg_joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=LEG_JOINTS,
+        scale=0.9,
+        use_default_offset=True,
+        preserve_order=True,
+    )
+
+    wheel_joint_vel = mdp.JointVelocityActionCfg(
+        asset_name="robot",
+        joint_names=WHEEL_JOINTS,
+        scale=20.0,
+        use_default_offset=True,
+        preserve_order=True,
     )
 
 
@@ -91,6 +145,18 @@ class ObservationsCfg(IsaacLabObservationsCfg):
             noise=Unoise(n_min=-0.05, n_max=0.05),
         )
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        height_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_height"})
+        base_height = ObsTerm(
+            func=my_observations.base_height,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME)},
+        )
+        base_height_error = ObsTerm(
+            func=my_observations.base_height_error,
+            params={
+                "command_name": "base_height",
+                "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
+            },
+        )
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
         actions = ObsTerm(func=mdp.last_action)
@@ -130,7 +196,7 @@ class EventCfg(IsaacLabEventCfg):
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
             "mass_distribution_params": (-5.0, 5.0),
             "operation": "add",
         },
@@ -140,7 +206,7 @@ class EventCfg(IsaacLabEventCfg):
         func=mdp.randomize_rigid_body_com,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
             "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.01, 0.01)},
         },
     )
@@ -150,7 +216,7 @@ class EventCfg(IsaacLabEventCfg):
         func=mdp.apply_external_force_torque,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
             "force_range": (0.0, 0.0),
             "torque_range": (-0.0, 0.0),
         },
@@ -160,23 +226,28 @@ class EventCfg(IsaacLabEventCfg):
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "pose_range": {
+                "x": (-0.05, 0.05),
+                "y": (-0.05, 0.05),
+                "z": (0.0, 0.0),  # Offset from the default root height.
+                "yaw": (-0.1, 0.1),
+            },
             "velocity_range": {
-                "x": (-0.5, 0.5),
-                "y": (-0.5, 0.5),
-                "z": (-0.5, 0.5),
-                "roll": (-0.5, 0.5),
-                "pitch": (-0.5, 0.5),
-                "yaw": (-0.5, 0.5),
+                "x": (-0.05, 0.05),
+                "y": (-0.05, 0.05),
+                "z": (-0.02, 0.02),
+                "roll": (-0.02, 0.02),
+                "pitch": (-0.02, 0.02),
+                "yaw": (-0.02, 0.02),
             },
         },
     )
 
     reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "position_range": (0.5, 1.5),
+            "position_range": (0.0, 0.0),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -194,39 +265,142 @@ class EventCfg(IsaacLabEventCfg):
 class RewardsCfg(IsaacLabRewardsCfg):
     """Reward terms for the MDP."""
 
-    # -- task
-    track_lin_vel_xy_exp = RewTerm(
-        func=mdp.track_lin_vel_xy_exp,
-        weight=1.0,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
+    # -- old wheel-leg velocity rewards
+    track_lin_vel_xy_exp = None
+    track_ang_vel_z_exp = None
+
+    vx_tracking = RewTerm(
+        func=my_rewards.vx_tracking_gaussian,
+        weight=4.0,
+        params={"command_name": "base_velocity", "sigma": 0.35},
     )
-    track_ang_vel_z_exp = RewTerm(
-        func=mdp.track_ang_vel_z_exp,
-        weight=0.5,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
+
+    vx_tracking_huber = RewTerm(
+        func=my_rewards.vx_tracking_huber,
+        weight=-0.2,
+        params={"command_name": "base_velocity", "beta": 0.3, "max_value": 2.0},
     )
-    # -- penalties
-    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    feet_air_time = RewTerm(
-        func=mdp.feet_air_time,
-        weight=0.125,
+
+    wheel_vx_tracking = None
+    wheel_vx_tracking_huber = None
+    base_wheel_vx_consistency = None
+
+    orientation_tracking = RewTerm(
+        func=my_rewards.orientation_exp_kernel,
+        weight=3.0,
+        params={"kernel_coeff": 20.0},
+    )
+
+    # redundant with orientation_tracking / ang_vel_xy_l2
+    pitch_tracking = None
+    pitch_rate = None
+
+    base_height_tracking = RewTerm(
+        func=my_rewards.base_height_command_exp_kernel,
+        weight=2.0,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*FOOT"),
-            "command_name": "base_velocity",
-            "threshold": 0.5,
+            "command_name": "base_height",
+            "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
+            "kernel_coeff": 80.0,
         },
     )
-    undesired_contacts = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), "threshold": 1.0},
+
+    # redundant with base_height_tracking / base_height_l2
+    base_height_fine = None
+
+    base_height_l2 = RewTerm(
+        func=my_rewards.base_height_command_l2,
+        weight=-0.5,
+        params={
+            "command_name": "base_height",
+            "error_scale": 0.05,
+            "max_value": 9.0,
+            "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
+        },
     )
-    # -- optional penalties
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
+
+    yaw_rate_penalty = RewTerm(
+        func=my_rewards.yaw_rate_l2_when_no_yaw_command,
+        weight=-0.05,
+        params={
+            "command_name": "base_velocity",
+            "command_deadband": 0.05,
+            "yaw_rate_deadband": 0.02,
+            "max_value": 4.0,
+        },
+    )
+
+    torques = RewTerm(
+        func=my_rewards.joint_torques_l2,
+        weight=-1.0e-4,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINTS, preserve_order=True),
+            "max_value": 1.0e5,
+        },
+    )
+
+    base_contact = RewTerm(
+        func=my_rewards.contact_sensor_contact,
+        weight=-2.0,
+        params={
+            "threshold": 0.1,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=BASE_CONTACT_BODY_NAMES),
+        },
+    )
+
+    wheel_action_rate = RewTerm(
+        func=my_rewards.action_rate_l2,
+        weight=-0.02,
+        params={"action_slice": (4, 6), "max_value": 1.0e3},
+    )
+
+    leg_action_smooth = RewTerm(
+        func=my_rewards.action_second_order_l2,
+        weight=-0.03,
+        params={"action_slice": (0, 4), "max_value": 1.0e3},
+    )
+
+    # -- anti-squat: penalize motion of the leg joints themselves
+    # Conservative version (default). Targets periodic leg pumping directly;
+    # wheels are untouched so balancing and vx tracking are unaffected.
+    leg_joint_vel_l2 = RewTerm(
+        func=my_rewards.leg_joint_vel_l2,
+        weight=-0.01,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINTS, preserve_order=True),
+            "max_value": 1.0e3,
+        },
+    )
+
+    # Stronger suppression: set the plain term above to None and enable this one
+    # instead. The gate relaxes the penalty while the height error is large, so
+    # active base_height command transitions stay cheap.
+    # leg_joint_vel_l2_height_gated = RewTerm(
+    #     func=my_rewards.leg_joint_vel_l2_height_gated,
+    #     weight=-0.03,
+    #     params={
+    #         "command_name": "base_height",
+    #         "gate_sigma": 0.03,
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot",
+    #             joint_names=LEG_JOINTS,
+    #             body_names=BASE_BODY_NAME,
+    #             preserve_order=True,
+    #         ),
+    #         "max_value": 1.0e3,
+    #     },
+    # )
+
+    # -- inherited/default reward terms disabled or kept at zero
+    track_base_height_exp = None
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    dof_torques_l2 = None
+    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    action_rate_l2 = None
+    feet_air_time = None
+    undesired_contacts = None
+    flat_orientation_l2 = None
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
 
 
@@ -236,8 +410,25 @@ class TerminationsCfg(IsaacLabTerminationsCfg):
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_contact = DoneTerm(
-        func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
+        func=my_terminations.illegal_contact_after_steps,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=BASE_CONTACT_BODY_NAMES),
+            "threshold": 1.0,
+            "min_steps": 100,
+        },
+    )
+    bad_roll_pitch = DoneTerm(
+        func=my_terminations.bad_roll_pitch,
+        params={"asset_cfg": SceneEntityCfg("robot"), "limit_angle": 0.7},
+    )
+    leg_tendon_length = DoneTerm(
+        func=my_terminations.leg_tendon_length_out_of_range,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=LEG_EXTENSION_BODY_NAMES, preserve_order=True),
+            "min_length": 0.0,
+            "max_length": 0.388,
+            "tolerance": 0.005,
+        },
     )
 
 
@@ -254,6 +445,7 @@ class LocomotionVelocityRoughEnvCfg(IsaacLabLocomotionVelocityRoughEnvCfg):
 
     scene: MySceneCfg = MySceneCfg(num_envs=1024, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()

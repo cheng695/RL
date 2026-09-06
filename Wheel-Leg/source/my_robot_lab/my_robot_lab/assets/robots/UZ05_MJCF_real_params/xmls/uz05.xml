@@ -1,0 +1,227 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="UZ-05 wheel-legged chassis">
+  <compiler angle="radian" meshdir="../meshes/stl" />
+  <visual>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.8 0.8 0.8" />
+    <rgba haze="0.15 0.25 0.35 1" />
+  </visual>
+  <asset>
+    <mesh name="chassis_collision_trapezoid" vertex="-0.16057692 -0.29399796 -0.10461356 0.16057692 -0.29399796 -0.10461356 0.16057692 0.29399796 -0.10461356 -0.16057692 0.29399796 -0.10461356 -0.16057692 -0.21899796 0.10461356 0.16057692 -0.21899796 0.10461356 0.16057692 0.21899796 0.10461356 -0.16057692 0.21899796 0.10461356" face="0 2 1 0 3 2 4 5 6 4 6 7 0 1 5 0 5 4 3 7 6 3 6 2 0 4 7 0 7 3 1 2 6 1 6 5" />
+    <mesh name="left_link_right_leg_1" file="left_link_right_leg_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_link_right_leg_2" file="left_link_right_leg_2.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_link_right_leg_3" file="left_link_right_leg_3.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_link_right_leg_4" file="left_link_right_leg_4.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_link_right_leg_5" file="left_link_right_leg_5.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_link_right_leg_6" file="left_link_right_leg_6.stl" scale="0.001 0.001 0.001" />
+    <mesh name="left_right_wheel" file="left_right_wheel.stl" scale="0.000916666667 0.000916666667 0.000916666667" />
+    <mesh name="right_link_right_leg_1" file="right_link_right_leg_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_link_right_leg_2" file="right_link_right_leg_2.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_link_right_leg_3" file="right_link_right_leg_3.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_link_right_leg_4" file="right_link_right_leg_4.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_link_right_leg_5" file="right_link_right_leg_5.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_link_right_leg_6" file="right_link_right_leg_6.stl" scale="0.001 0.001 0.001" />
+    <mesh name="right_right_wheel" file="right_right_wheel.stl" scale="0.000916666667 0.000916666667 0.000916666667" />
+    <mesh name="body_000" file="body_000.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_001" file="body_001.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_002" file="body_002.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_003" file="body_003.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_004" file="body_004.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_005" file="body_005.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_006" file="body_006.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_007" file="body_007.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_008" file="body_008.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_009" file="body_009.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_010" file="body_010.stl" scale="0.001 0.001 0.001" />
+    <mesh name="body_011" file="body_011.stl" scale="0.001 0.001 0.001" />
+    <mesh name="gimal_000" file="gimal_000.obj" scale="0.001 0.001 0.001" />
+    <mesh name="gimal_001" file="gimal_001.obj" scale="0.001 0.001 0.001" />
+    <mesh name="gimal_002" file="gimal_002.obj" scale="0.001 0.001 0.001" />
+  </asset>
+  <worldbody>
+    <body name="chassis" pos="0 0 0.300377934">
+      <freejoint name="chassis_free" />
+      <inertial pos="0 0 0" mass="10.651834504036061" diaginertia="0.35 0.2 0.45" />
+      <site name="base_link" type="sphere" pos="0 0 0" size="0.008" rgba="1 1 1 0.8" group="4" />
+      <site name="imu" type="sphere" pos="0 0 0" quat="1 0 0 0" size="0.004" rgba="0.2 0.8 1 0" group="5" />
+      <frame name="legacy_y_forward_model_frame" quat="0.707106781 0 0 -0.707106781">
+        <geom name="body_visual_000" type="mesh" mesh="body_000" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_001" type="mesh" mesh="body_001" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_002" type="mesh" mesh="body_002" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_003" type="mesh" mesh="body_003" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_004" type="mesh" mesh="body_004" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_005" type="mesh" mesh="body_005" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_006" type="mesh" mesh="body_006" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_007" type="mesh" mesh="body_007" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_008" type="mesh" mesh="body_008" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_009" type="mesh" mesh="body_009" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_010" type="mesh" mesh="body_010" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="body_visual_011" type="mesh" mesh="body_011" rgba="0.25 0.3 0.34 1" contype="0" conaffinity="0" />
+        <geom name="chassis_collision" type="mesh" mesh="chassis_collision_trapezoid" pos="0 0 -0.004386246" mass="0" rgba="0.12 0.23 0.38 0" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" />
+        <body name="gimbal_fixed" pos="0 0 0">
+          <inertial pos="0 -0.0175142899 0.1515931137" mass="2.4" diaginertia="0.05334 0.03520 0.05020" />
+        <geom name="gimbal_visual_000" type="mesh" mesh="gimal_000" mass="0" contype="0" conaffinity="0" rgba="0.35 0.35 0.38 1" />
+        <geom name="gimbal_visual_001" type="mesh" mesh="gimal_001" mass="0" contype="0" conaffinity="0" rgba="0.35 0.35 0.38 1" />
+        <geom name="gimbal_visual_002" type="mesh" mesh="gimal_002" mass="0" contype="0" conaffinity="0" rgba="0.35 0.35 0.38 1" />
+        <geom name="gimbal_collision" type="box" pos="0 -0.01751429 0.15159311" size="0.1417 0.20674 0.1547" mass="0" rgba="0.12 0.23 0.38 0" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" />
+        </body>
+        <camera name="overview" pos="1.1 -1.5 0.8" xyaxes="0.806 0.592 0 -0.236 0.322 0.917" />
+        <body name="left_leg_mount" pos="-0.210335 0 0">
+          <body name="left_link_right_leg_2" pos="0 0 0">
+            <joint name="left_J_chassis_link2" type="hinge" axis="1 0 0" damping="0.02" armature="0.015795" />
+            <inertial pos="0.0312788248 -0.0872244528 -0.0341169325" mass="0.33726515207227498" fullinertia="0.00213441307 0.000367588625 0.00177584952 -1.95845727e-07 6.72512301e-07 -0.000672571974" />
+            <geom name="left_link_right_leg_2_visual" type="mesh" mesh="left_link_right_leg_2" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+            <geom name="left_link_right_leg_2_collision_0" type="capsule" size="0.014" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.087263437 -0.036267659" />
+            <geom name="left_link_right_leg_2_collision_1" type="capsule" size="0.014" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.193918746 -0.080594782" />
+            <body name="left_link_right_leg_5" pos="0 -0.087263437 -0.036267659">
+              <joint name="left_J_link2_link5" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+              <inertial pos="0.01525 0.0202954079 -0.0113681935" mass="0.10788547284235001" fullinertia="0.000349769167 0.000169439722 0.000181606949 0 0 0.000168198489" />
+              <geom name="left_link_right_leg_5_visual" type="mesh" mesh="left_link_right_leg_5" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+              <geom name="left_link_right_leg_5_collision_0" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.0872634346 -0.07100241" />
+              <geom name="left_link_right_leg_5_collision_1" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.038083202 0.052675149" />
+              <body name="left_link_right_leg_3" pos="0 0.0872634346 -0.07100241">
+                <joint name="left_J_link5_link3" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                <inertial pos="0.0273116548 0.043631697 0.0355011868" mass="0.055275907394814701" fullinertia="8.07813584e-05 3.27687454e-05 4.87260135e-05 0 0 -3.84174742e-05" />
+                <geom name="left_link_right_leg_3_visual" type="mesh" mesh="left_link_right_leg_3" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                <geom name="left_link_right_leg_3_collision_0" type="capsule" size="0.009" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.0872634434 0.071002411" />
+                <site name="left_site_link3_to_link4" pos="0 0.0872634434 0.071002411" size="0.002" rgba="1 0.2 0.1 0" />
+              </body>
+              <body name="left_link_right_leg_1" pos="0 -0.038083202 0.052675149">
+                <joint name="left_J_link5_link1" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                <inertial pos="0.00318713722 -0.053327692 -0.0221635943" mass="0.057077033175480997" fullinertia="8.6999945e-05 1.40259018e-05 7.37229014e-05 0 0 -2.9991192e-05" />
+                <geom name="left_link_right_leg_1_visual" type="mesh" mesh="left_link_right_leg_1" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                <geom name="left_link_right_leg_1_collision_0" type="capsule" size="0.009" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.106655319 -0.044327161" />
+                <body name="left_link_right_leg_6" pos="0 -0.106655319 -0.044327161">
+                  <joint name="left_J_link1_link6" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                  <inertial pos="0.0154465748 0.129629238 -0.124969703" mass="0.35678989619168999" fullinertia="0.0036231355 0.00154094766 0.00209123503 7.35445334e-06 -6.61012664e-06 0.00172906234" />
+                  <geom name="left_link_right_leg_6_visual" type="mesh" mesh="left_link_right_leg_6" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                  <geom name="left_link_right_leg_6_collision_0" type="capsule" size="0.015" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.038083212 -0.052675111" />
+                  <geom name="left_link_right_leg_6_collision_1" type="capsule" size="0.015" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.232001957 -0.210458263" />
+                  <body name="left_right_wheel" pos="0 0.232001957 -0.210458263">
+                    <joint name="left_J_link6_wheel" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                    <inertial pos="-0.0114231133 6.95796156e-05 -4.77515438e-05" mass="0.24511650859182901" fullinertia="0.000310811554 0.000174440013 0.000174360453 -2.79107328e-07 1.85069428e-07 -1.7786433e-07" />
+                    <geom name="left_right_wheel_visual" type="mesh" mesh="left_right_wheel" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                    <geom name="left_wheel_collision" type="cylinder" size="0.055 0.0125" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" quat="0.707106781 0 0.707106781 0" />
+                    <site name="left_wheel_axis_limit_site" pos="0 0 0" size="0.002" rgba="0.2 1 0.2 0" />
+                  </body>
+                  <site name="left_site_link6_to_link2" pos="0 0.038083212 -0.052675111" size="0.002" rgba="1 0.2 0.1 0" />
+                </body>
+              </body>
+            </body>
+            <site name="left_site_link2_to_link6" pos="0 -0.193918746 -0.080594782" size="0.002" rgba="1 0.2 0.1 0" />
+          </body>
+          <body name="left_link_right_leg_4" pos="0 0 0">
+            <joint name="left_J_chassis_link4" type="hinge" axis="1 0 0" damping="0.02" armature="0.015795" />
+            <inertial pos="0.0154363205 0.0319502343 -0.0132788729" mass="0.27121511798094999" fullinertia="0.000367429102 7.52545039e-05 0.000295856827 1.21528679e-06 -5.05086728e-07 0.000110828476" />
+            <geom name="left_link_right_leg_4_visual" type="mesh" mesh="left_link_right_leg_4" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+            <geom name="left_link_right_leg_4_collision_0" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.087263441 -0.036267658" />
+            <site name="left_site_link4_to_link3" pos="0 0.087263441 -0.036267658" size="0.002" rgba="1 0.2 0.1 0" />
+          </body>
+          <site name="left_hip_axis_limit_site" pos="0 0 0" size="0.002" rgba="0.2 1 0.2 0" />
+        </body>
+        <body name="right_leg_mount" pos="0.210335 0 0">
+          <body name="right_link_right_leg_2" pos="0 0 0">
+            <joint name="right_J_chassis_link2" type="hinge" axis="1 0 0" damping="0.02" armature="0.015795" />
+            <inertial pos="-0.0312788248 -0.0872244528 -0.0341169325" mass="0.38623297789897398" fullinertia="0.0024443104 0.000420959142 0.00203368668 2.24280741e-07 -7.70154957e-07 -0.000770223294" />
+            <geom name="right_link_right_leg_2_visual" type="mesh" mesh="right_link_right_leg_2" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+            <geom name="right_link_right_leg_2_collision_0" type="capsule" size="0.014" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.087263437 -0.036267659" />
+            <geom name="right_link_right_leg_2_collision_1" type="capsule" size="0.014" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.193918746 -0.080594782" />
+            <body name="right_link_right_leg_5" pos="0 -0.087263437 -0.036267659">
+              <joint name="right_J_link2_link5" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+              <inertial pos="-0.01525 0.0202954079 -0.0113681935" mass="0.10788547284235001" fullinertia="0.000349769167 0.000169439722 0.000181606949 0 0 0.000168198489" />
+              <geom name="right_link_right_leg_5_visual" type="mesh" mesh="right_link_right_leg_5" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+              <geom name="right_link_right_leg_5_collision_0" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.0872634346 -0.07100241" />
+              <geom name="right_link_right_leg_5_collision_1" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.038083202 0.052675149" />
+              <body name="right_link_right_leg_3" pos="0 0.0872634346 -0.07100241">
+                <joint name="right_J_link5_link3" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                <inertial pos="-0.0273116548 0.043631697 0.0355011868" mass="0.055275907394814798" fullinertia="8.07813584e-05 3.27687454e-05 4.87260135e-05 0 0 -3.84174742e-05" />
+                <geom name="right_link_right_leg_3_visual" type="mesh" mesh="right_link_right_leg_3" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                <geom name="right_link_right_leg_3_collision_0" type="capsule" size="0.009" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.0872634434 0.071002411" />
+                <site name="right_site_link3_to_link4" pos="0 0.0872634434 0.071002411" size="0.002" rgba="1 0.2 0.1 0" />
+              </body>
+              <body name="right_link_right_leg_1" pos="0 -0.038083202 0.052675149">
+                <joint name="right_J_link5_link1" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                <inertial pos="-0.00318713722 -0.053327692 -0.0221635943" mass="0.057077033175480997" fullinertia="8.6999945e-05 1.40259018e-05 7.37229014e-05 0 0 -2.9991192e-05" />
+                <geom name="right_link_right_leg_1_visual" type="mesh" mesh="right_link_right_leg_1" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                <geom name="right_link_right_leg_1_collision_0" type="capsule" size="0.009" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 -0.106655319 -0.044327161" />
+                <body name="right_link_right_leg_6" pos="0 -0.106655319 -0.044327161">
+                  <joint name="right_J_link1_link6" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                  <inertial pos="-0.0154465748 0.129629238 -0.124969703" mass="0.35678989607011002" fullinertia="0.00362313549 0.00154094766 0.00209123503 -7.35445334e-06 6.61012664e-06 0.00172906234" />
+                  <geom name="right_link_right_leg_6_visual" type="mesh" mesh="right_link_right_leg_6" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                  <geom name="right_link_right_leg_6_collision_0" type="capsule" size="0.015" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.038083212 -0.052675111" />
+                  <geom name="right_link_right_leg_6_collision_1" type="capsule" size="0.015" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.232001957 -0.210458263" />
+                  <body name="right_right_wheel" pos="0 0.232001957 -0.210458263">
+                    <joint name="right_J_link6_wheel" type="hinge" axis="1 0 0" damping="0.02" armature="0.0001" />
+                    <inertial pos="0.0114231133 6.95796156e-05 -4.77515438e-05" mass="0.24511650859182901" fullinertia="0.000310811554 0.000174440013 0.000174360453 2.79107328e-07 -1.85069428e-07 -1.7786433e-07" />
+                    <geom name="right_right_wheel_visual" type="mesh" mesh="right_right_wheel" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+                    <geom name="right_wheel_collision" type="cylinder" size="0.055 0.0125" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" quat="0.707106781 0 0.707106781 0" />
+                    <site name="right_wheel_axis_limit_site" pos="0 0 0" size="0.002" rgba="0.2 1 0.2 0" />
+                  </body>
+                  <site name="right_site_link6_to_link2" pos="0 0.038083212 -0.052675111" size="0.002" rgba="1 0.2 0.1 0" />
+                </body>
+              </body>
+            </body>
+            <site name="right_site_link2_to_link6" pos="0 -0.193918746 -0.080594782" size="0.002" rgba="1 0.2 0.1 0" />
+          </body>
+          <body name="right_link_right_leg_4" pos="0 0 0">
+            <joint name="right_J_chassis_link4" type="hinge" axis="1 0 0" damping="0.02" armature="0.015795" />
+            <inertial pos="-0.0154363205 0.0319502343 -0.0132788729" mass="0.109162611740991" fullinertia="0.000147888218 3.0289529e-05 0.000119080766 -4.8914633e-07 2.03294664e-07 4.46078597e-05" />
+            <geom name="right_link_right_leg_4_visual" type="mesh" mesh="right_link_right_leg_4" contype="0" conaffinity="0" rgba="0.65 0.7 0.75 1" />
+            <geom name="right_link_right_leg_4_collision_0" type="capsule" size="0.012" mass="0" rgba="0.9 0.25 0.1 0.18" friction="1 0.01 0.001" solref="0.002 1" solimp="0.99 0.999 0.001" contype="1" conaffinity="1" fromto="0 0 0 0 0.087263441 -0.036267658" />
+            <site name="right_site_link4_to_link3" pos="0 0.087263441 -0.036267658" size="0.002" rgba="1 0.2 0.1 0" />
+          </body>
+          <site name="right_hip_axis_limit_site" pos="0 0 0" size="0.002" rgba="0.2 1 0.2 0" />
+        </body>
+      </frame>
+    </body>
+  </worldbody>
+  <contact>
+    <exclude body1="chassis" body2="left_link_right_leg_2" />
+    <exclude body1="chassis" body2="left_link_right_leg_4" />
+    <exclude body1="chassis" body2="right_link_right_leg_2" />
+    <exclude body1="chassis" body2="right_link_right_leg_4" />
+    <exclude body1="left_link_right_leg_1" body2="left_link_right_leg_5" />
+    <exclude body1="left_link_right_leg_1" body2="left_link_right_leg_6" />
+    <exclude body1="left_link_right_leg_2" body2="left_link_right_leg_4" />
+    <exclude body1="left_link_right_leg_2" body2="left_link_right_leg_5" />
+    <exclude body1="left_link_right_leg_2" body2="left_link_right_leg_6" />
+    <exclude body1="left_link_right_leg_3" body2="left_link_right_leg_4" />
+    <exclude body1="left_link_right_leg_3" body2="left_link_right_leg_5" />
+    <exclude body1="left_link_right_leg_6" body2="left_right_wheel" />
+    <exclude body1="right_link_right_leg_1" body2="right_link_right_leg_5" />
+    <exclude body1="right_link_right_leg_1" body2="right_link_right_leg_6" />
+    <exclude body1="right_link_right_leg_2" body2="right_link_right_leg_4" />
+    <exclude body1="right_link_right_leg_2" body2="right_link_right_leg_5" />
+    <exclude body1="right_link_right_leg_2" body2="right_link_right_leg_6" />
+    <exclude body1="right_link_right_leg_3" body2="right_link_right_leg_4" />
+    <exclude body1="right_link_right_leg_3" body2="right_link_right_leg_5" />
+    <exclude body1="right_link_right_leg_6" body2="right_right_wheel" />
+  </contact>
+  <equality>
+    <connect name="left_close_link3_link4" site1="left_site_link3_to_link4" site2="left_site_link4_to_link3" solref="0.002 1" solimp="0.999 0.9999 0.001" />
+    <connect name="left_close_link6_link2" site1="left_site_link6_to_link2" site2="left_site_link2_to_link6" solref="0.002 1" solimp="0.999 0.9999 0.001" />
+    <connect name="right_close_link3_link4" site1="right_site_link3_to_link4" site2="right_site_link4_to_link3" solref="0.002 1" solimp="0.999 0.9999 0.001" />
+    <connect name="right_close_link6_link2" site1="right_site_link6_to_link2" site2="right_site_link2_to_link6" solref="0.002 1" solimp="0.999 0.9999 0.001" />
+  </equality>
+  <tendon>
+    <spatial name="left_leg_max_extension" limited="true" range="0 0.388">
+      <site site="left_hip_axis_limit_site" />
+      <site site="left_wheel_axis_limit_site" />
+    </spatial>
+    <spatial name="right_leg_max_extension" limited="true" range="0 0.388">
+      <site site="right_hip_axis_limit_site" />
+      <site site="right_wheel_axis_limit_site" />
+    </spatial>
+  </tendon>
+  <actuator>
+    <motor name="left_dm8009p_link2" joint="left_J_chassis_link2" gear="1" ctrllimited="true" ctrlrange="-39 39" forcelimited="true" forcerange="-39 39" />
+    <motor name="left_dm8009p_link4" joint="left_J_chassis_link4" gear="1" ctrllimited="true" ctrlrange="-39 39" forcelimited="true" forcerange="-39 39" />
+    <motor name="right_dm8009p_link2" joint="right_J_chassis_link2" gear="1" ctrllimited="true" ctrlrange="-39 39" forcelimited="true" forcerange="-39 39" />
+    <motor name="right_dm8009p_link4" joint="right_J_chassis_link4" gear="1" ctrllimited="true" ctrlrange="-39 39" forcelimited="true" forcerange="-39 39" />
+    <motor name="left_rm3508_wheel" joint="left_J_link6_wheel" gear="15.7647058824" ctrllimited="true" ctrlrange="-0.2854477612 0.2854477612" forcelimited="true" forcerange="-0.2854477612 0.2854477612" />
+    <motor name="right_rm3508_wheel" joint="right_J_link6_wheel" gear="15.7647058824" ctrllimited="true" ctrlrange="-0.2854477612 0.2854477612" forcelimited="true" forcerange="-0.2854477612 0.2854477612" />
+  </actuator>
+  <sensor>
+    <accelerometer name="imu_accel" site="imu" />
+    <gyro name="imu_ang_vel" site="imu" />
+  </sensor>
+</mujoco>

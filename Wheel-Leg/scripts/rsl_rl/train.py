@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata as metadata
+import math
 import os
 import sys
 import time
@@ -24,9 +25,17 @@ parser.add_argument("--task", type=str, default="MyRobot-Velocity-Flat-v0", help
 parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments.")
 parser.add_argument("--seed", type=int, default=None, help="Random seed. Use -1 for a random seed.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Override PPO training iterations.")
+parser.add_argument(
+    "--reset_noise_std", type=float, default=None,
+    help="Reset policy exploration std after loading a checkpoint (e.g. 0.5).",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.reset_noise_std is not None and (
+    not math.isfinite(args_cli.reset_noise_std) or args_cli.reset_noise_std <= 0
+):
+    parser.error("--reset_noise_std must be finite and positive")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -89,8 +98,26 @@ def main() -> None:
         print(f"[INFO] Loading checkpoint: {resume_path}")
         runner.load(resume_path)
 
+    if args_cli.reset_noise_std is not None:
+        policy = runner.alg.get_policy()
+        noise_parameters = [
+            (name, parameter) for name, parameter in policy.named_parameters()
+            if name.split(".")[-1] in ("std_param", "log_std_param")
+        ]
+        if not noise_parameters:
+            raise RuntimeError("Policy has no supported state-independent noise parameter")
+        with torch.no_grad():
+            for name, parameter in noise_parameters:
+                value = args_cli.reset_noise_std
+                parameter.fill_(math.log(value) if name.endswith("log_std_param") else value)
+                runner.alg.optimizer.state.pop(parameter, None)
+        print(f"[INFO] Reset policy exploration std to {args_cli.reset_noise_std}")
+
+    env.unwrapped.command_manager.get_term("base_velocity").cfg.action_limit = agent_cfg.clip_actions or float("inf")
+
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "launch.yaml"), {"reset_noise_std": args_cli.reset_noise_std})
 
     start_time = time.time()
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

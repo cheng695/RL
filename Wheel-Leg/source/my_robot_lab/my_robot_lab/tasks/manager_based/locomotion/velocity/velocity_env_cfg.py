@@ -83,26 +83,36 @@ class MySceneCfg(IsaacLabVelocitySceneCfg):
 class CommandsCfg(IsaacLabCommandsCfg):
     """Command specifications for the wheel-leg velocity task."""
 
-    base_velocity = mdp.UniformVelocityCommandCfg(
+    base_velocity = my_commands.PositiveBiasedVelocityCommandCfg(
         asset_name="robot",
-        resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.1,
+        resampling_time_range=(2.0, 5.0),
+        rel_standing_envs=0.0,
         rel_heading_envs=0.0,
-        heading_command=True,
+        heading_command=False,
         heading_control_stiffness=0.5,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
             lin_vel_y=(0.0, 0.0),
-            ang_vel_z=(-2.0, 2.0),
-            heading=(-math.pi, math.pi),
+            ang_vel_z=(-1.0, 1.0),
+            heading=None,
         ),
+        straight_command_prob=0.2,
+        turn_command_prob=0.7,
+        mixed_command_prob=0.1,
+        positive_lin_vel_x_prob=0.7,
+        zero_lin_vel_x_prob=0.0,
+        min_abs_lin_vel_x=0.08,
+        min_abs_ang_vel_z=0.15,
+        abrupt_flip_prob=0.25,
+        abrupt_flip_min_abs_lin_vel_x=0.6,
+        abrupt_flip_max_abs_lin_vel_x=1.0,
     )
 
     base_height = my_commands.UniformBaseHeightCommandCfg(
         asset_name="robot",
         resampling_time_range=(1.0e9, 1.0e9),
-        height_range=INITIAL_BASE_HEIGHT_RANGE,
+        height_range=(0.28, 0.34),
     )
 
 
@@ -271,14 +281,41 @@ class RewardsCfg(IsaacLabRewardsCfg):
 
     vx_tracking = RewTerm(
         func=my_rewards.vx_tracking_gaussian,
-        weight=4.0,
+        weight=2.0,
         params={"command_name": "base_velocity", "sigma": 0.35},
     )
 
     vx_tracking_huber = RewTerm(
         func=my_rewards.vx_tracking_huber,
-        weight=-0.2,
+        weight=-0.1,
         params={"command_name": "base_velocity", "beta": 0.3, "max_value": 2.0},
+    )
+
+    yaw_tracking = RewTerm(
+        func=my_rewards.yaw_tracking_gaussian,
+        weight=4.0,
+        params={"command_name": "base_velocity", "sigma": 0.45},
+    )
+
+    yaw_tracking_fine = None
+
+    yaw_tracking_huber = RewTerm(
+        func=my_rewards.yaw_tracking_huber,
+        weight=-0.75,
+        params={"command_name": "base_velocity", "beta": 0.35, "max_value": 6.0},
+    )
+
+    wheel_yaw_rate_consistency = RewTerm(
+        func=my_rewards.wheel_yaw_rate_consistency_l2,
+        weight=-0.04,
+        params={
+            "command_name": "base_velocity",
+            "wheel_base": 0.42067,
+            "wheel_radius": 0.055,
+            "max_value": 100.0,
+            "wheel_diff_sign": 1.0,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=WHEEL_JOINTS, preserve_order=True),
+        },
     )
 
     wheel_vx_tracking = None
@@ -297,11 +334,11 @@ class RewardsCfg(IsaacLabRewardsCfg):
 
     base_height_tracking = RewTerm(
         func=my_rewards.base_height_command_exp_kernel,
-        weight=2.0,
+        weight=1.0,
         params={
             "command_name": "base_height",
             "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
-            "kernel_coeff": 80.0,
+            "kernel_coeff": 200.0,
         },
     )
 
@@ -310,7 +347,7 @@ class RewardsCfg(IsaacLabRewardsCfg):
 
     base_height_l2 = RewTerm(
         func=my_rewards.base_height_command_l2,
-        weight=-0.5,
+        weight=-0.2,
         params={
             "command_name": "base_height",
             "error_scale": 0.05,
@@ -330,12 +367,31 @@ class RewardsCfg(IsaacLabRewardsCfg):
         },
     )
 
+    stand_still_lin_vel = RewTerm(
+        func=my_rewards.stand_still_lin_vel_l2,
+        weight=-1.0,
+        params={
+            "command_name": "base_velocity",
+            "command_deadband": 0.08,
+            "max_value": 4.0,
+        },
+    )
+
     torques = RewTerm(
         func=my_rewards.joint_torques_l2,
         weight=-1.0e-4,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINTS, preserve_order=True),
             "max_value": 1.0e5,
+        },
+    )
+
+    wheel_power = RewTerm(
+        func=my_rewards.wheel_power_l1_positive,
+        weight=-1.0e-4,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=WHEEL_JOINTS, preserve_order=True),
+            "max_value": 1.0e4,
         },
     )
 
@@ -360,12 +416,18 @@ class RewardsCfg(IsaacLabRewardsCfg):
         params={"action_slice": (0, 4), "max_value": 1.0e3},
     )
 
+    wheel_action_smooth = RewTerm(
+        func=my_rewards.action_second_order_l2,
+        weight=-0.01,
+        params={"action_slice": (4, 6), "max_value": 1.0e3},
+    )
+
     # -- anti-squat: penalize motion of the leg joints themselves
     # Conservative version (default). Targets periodic leg pumping directly;
     # wheels are untouched so balancing and vx tracking are unaffected.
     leg_joint_vel_l2 = RewTerm(
         func=my_rewards.leg_joint_vel_l2,
-        weight=-0.01,
+        weight=-0.03,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINTS, preserve_order=True),
             "max_value": 1.0e3,

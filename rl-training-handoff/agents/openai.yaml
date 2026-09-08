@@ -1,0 +1,4 @@
+interface:
+  display_name: "RL Training Handoff"
+  short_description: "Pull, inspect, preview, and bundle RL runs"
+  default_prompt: "Use $rl-training-handoff to inspect a completed remote RL run, expose TensorBoard, preview the policy locally, and create one analysis bundle."

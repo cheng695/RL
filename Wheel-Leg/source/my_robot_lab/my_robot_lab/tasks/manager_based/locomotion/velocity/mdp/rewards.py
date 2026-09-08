@@ -95,6 +95,59 @@ def vx_tracking_huber(
     return _finite_or_penalty(torch.clamp(loss, max=max_value), penalty=max_value)
 
 
+def yaw_tracking_gaussian(
+    env,
+    command_name: str,
+    sigma: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track commanded yaw rate with a Gaussian kernel."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    error = asset.data.root_ang_vel_b[:, 2] - command[:, 2]
+    sigma_sq = max(float(sigma) ** 2, 1.0e-6)
+    return _finite_or_penalty(torch.exp(-torch.square(error) / sigma_sq), penalty=0.0)
+
+
+def yaw_tracking_huber(
+    env,
+    command_name: str,
+    beta: float,
+    max_value: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize yaw error outside the useful range of the Gaussian reward."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    error = asset.data.root_ang_vel_b[:, 2] - command[:, 2]
+    abs_error = torch.abs(error)
+    beta = max(float(beta), 1.0e-6)
+    loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
+    return _finite_or_penalty(torch.clamp(loss, max=max_value), penalty=max_value)
+
+
+def wheel_yaw_rate_consistency_l2(
+    env,
+    command_name: str,
+    wheel_base: float,
+    wheel_radius: float,
+    max_value: float,
+    wheel_diff_sign: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize mismatch between commanded yaw rate and wheel differential velocity."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    if len(asset_cfg.joint_ids) != 2:
+        raise ValueError("wheel_yaw_rate_consistency_l2 expects two wheel joints ordered [left, right].")
+    command = env.command_manager.get_command(command_name)
+    left_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[0]]
+    right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
+    wheel_diff = float(wheel_diff_sign) * (right_wheel_vel - left_wheel_vel)
+    target_wheel_diff = float(wheel_base) / float(wheel_radius) * command[:, 2]
+    value = torch.square(wheel_diff - target_wheel_diff)
+    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
+
+
 def wheel_vx_tracking_gaussian(
     env,
     command_name: str,
@@ -278,6 +331,22 @@ def yaw_rate_l2_when_no_yaw_command(
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 
 
+def stand_still_lin_vel_l2(
+    env,
+    command_name: str,
+    command_deadband: float,
+    max_value: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize horizontal drift when the commanded forward speed is near zero."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    no_lin_command = torch.abs(command[:, 0]) <= command_deadband
+    lin_vel_xy = torch.nan_to_num(asset.data.root_lin_vel_b[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.where(no_lin_command, torch.sum(torch.square(lin_vel_xy), dim=1), torch.zeros_like(command[:, 0]))
+    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
+
+
 def joint_torques_l2(
     env,
     max_value: float,
@@ -286,6 +355,20 @@ def joint_torques_l2(
     """Penalize selected motor torques."""
     asset: Articulation = env.scene[asset_cfg.name]
     value = torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
+
+
+def wheel_power_l1_positive(
+    env,
+    max_value: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Penalize positive wheel mechanical power, matching the old wheel-leg reward style."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    torque = asset.data.applied_torque[:, asset_cfg.joint_ids]
+    joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    power = torch.nan_to_num(torque * joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.sum(torch.clamp(power, min=0.0), dim=1)
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 
 

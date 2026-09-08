@@ -10,7 +10,7 @@ from .mjcf import spawn_closed_loop_mjcf
 ROBOT_MJCF_DIR = Path(__file__).parent / "UZ05_MJCF_real_params"
 ROBOT_MJCF_PATH = ROBOT_MJCF_DIR / "xmls" / "uz05_isaac.xml"
 
-INITIAL_BASE_HEIGHT_RANGE = (0.28, 0.28)
+INITIAL_BASE_HEIGHT_RANGE = (0.25, 0.4)
 INITIAL_BASE_HEIGHT = 0.30
 
 LEG_JOINTS = [

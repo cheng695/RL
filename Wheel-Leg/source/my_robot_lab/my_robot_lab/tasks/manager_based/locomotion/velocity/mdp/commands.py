@@ -20,8 +20,22 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self._metric_steps = torch.zeros(self.num_envs, device=self.device)
-        for name in ("vx_mae_mps", "yaw_mae_radps", "action_at_limit_fraction"):
+        self.command_age = torch.zeros(self.num_envs, device=self.device)
+        for name in (
+            "vx_mae_mps", "yaw_mae_radps", "action_at_limit_fraction",
+            "leg_action_at_limit_fraction", "wheel_action_at_limit_fraction",
+        ):
             self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
+        self._mode_error_sums = {
+            mode: torch.zeros(self.num_envs, device=self.device)
+            for mode in (
+                "straight", "turn", "mixed", "straight_forward", "straight_reverse",
+                "straight_low_speed", "straight_high_speed",
+            )
+        }
+        self._mode_steps = {mode: torch.zeros_like(value) for mode, value in self._mode_error_sums.items()}
+        # Standing-only count, signed body vx sum, horizontal speed sum, path integral.
+        self._standing_sums = torch.zeros(self.num_envs, 4, device=self.device)
 
     def _update_metrics(self):
         super()._update_metrics()
@@ -36,10 +50,59 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
         # Per-episode running means do not depend on command resampling duration.
         for name, value in values.items():
             self.metrics[name] += (value - self.metrics[name]) / self._metric_steps
+        # ActionsCfg orders four leg position actions before two wheel velocities.
+        at_limit = (self._env.action_manager.action.abs() >= self.cfg.action_limit - 1.0e-6).float()
+        for name, value in (
+            ("leg_action_at_limit_fraction", at_limit[:, :4].mean(dim=-1)),
+            ("wheel_action_at_limit_fraction", at_limit[:, 4:6].mean(dim=-1)),
+        ):
+            self.metrics[name] += (value - self.metrics[name]) / self._metric_steps
+
+        moving = self.command[:, 0].abs() > 1.0e-6
+        turning = self.command[:, 2].abs() > 1.0e-6
+        standing = (self.command[:, :3].abs() <= 1.0e-6).all(dim=-1)
+        velocity = self.robot.data.root_lin_vel_b[:, :2]
+        speed = torch.linalg.vector_norm(velocity, dim=-1)
+        samples = torch.stack((torch.ones_like(speed), velocity[:, 0], speed,
+                               speed * self._env.step_dt), dim=-1)
+        self._standing_sums += torch.where(standing[:, None], samples, 0.0)
+        for mode, mask in (
+            ("straight", moving & ~turning),
+            ("turn", ~moving & turning),
+            ("mixed", moving & turning),
+            ("straight_forward", (self.command[:, 0] > 1.0e-6) & ~turning),
+            ("straight_reverse", (self.command[:, 0] < -1.0e-6) & ~turning),
+            ("straight_low_speed", moving & ~turning & (self.command[:, 0].abs() <= 0.5)),
+            ("straight_high_speed", moving & ~turning & (self.command[:, 0].abs() > 0.5)),
+        ):
+            self._mode_error_sums[mode] += torch.where(mask, values["vx_mae_mps"], 0.0)
+            self._mode_steps[mode] += mask.float()
 
     def reset(self, env_ids=None):
+        ids = slice(None) if env_ids is None else env_ids
+        # Pool only samples of this mode; episodes without it must not dilute MAE.
+        mode_metrics = {}
+        standing = self._standing_sums[ids].sum(dim=0)
+        mode_metrics["stand_sample_count"] = standing[0].item()
+        mode_metrics["stand_vx_bias_mps"] = (standing[1] / standing[0].clamp_min(1)).item()
+        mode_metrics["stand_speed_xy_mps"] = (standing[2] / standing[0].clamp_min(1)).item()
+        # Mean per episode with standing samples, not net displacement from a fixed anchor.
+        episodes = (self._standing_sums[ids, 0] > 0).sum().clamp_min(1)
+        mode_metrics["stand_path_length_m"] = (standing[3] / episodes).item()
+        for mode in self._mode_steps:
+            count = self._mode_steps[mode][ids].sum()
+            mode_metrics[f"vx_mae_{mode}_mps"] = (
+                self._mode_error_sums[mode][ids].sum() / count.clamp_min(1.0)
+            ).item()
+            # A zero count means the corresponding MAE is unavailable, not perfect.
+            mode_metrics[f"{mode}_sample_count"] = count.item()
         extras = super().reset(env_ids)
-        self._metric_steps[slice(None) if env_ids is None else env_ids] = 0
+        extras.update(mode_metrics)
+        self._metric_steps[ids] = 0
+        self._standing_sums[ids] = 0
+        for mode in self._mode_steps:
+            self._mode_steps[mode][ids] = 0
+            self._mode_error_sums[mode][ids] = 0
         return extras
 
     def _set_debug_vis_impl(self, debug_vis: bool):
@@ -74,6 +137,7 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
             return
 
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        self.command_age[env_ids] = 0.0
         num_resampled = len(env_ids)
         mode_values = torch.rand(num_resampled, device=self.device)
 
@@ -100,12 +164,32 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
             self._apply_abrupt_lin_vel_x_flips(linear_env_ids)
         if len(yaw_env_ids) > 0:
             self.vel_command_b[yaw_env_ids, 2] = self._sample_ang_vel_z(len(yaw_env_ids))
+        mixed_ids = env_ids[mixed_envs]
+        if self.cfg.mixed_yaw_limit is not None and len(mixed_ids) > 0:
+            self.vel_command_b[mixed_ids, 2] = self._sample_ang_vel_z(
+                len(mixed_ids), self.cfg.mixed_yaw_limit)
+
+        # Project the requested body twist onto the differential-drive wheel-speed
+        # workspace.  Both vx and yaw use the same factor, so the requested motion
+        # direction is preserved instead of clipping the two components separately.
+        self._project_to_wheel_speed_limit(env_ids)
 
         old_vx = getattr(self, "_previous_lin_vel_x_command", None)
         if old_vx is None or old_vx.shape[0] != self.num_envs:
             old_vx = torch.zeros(self.num_envs, device=self.device)
             setattr(self, "_previous_lin_vel_x_command", old_vx)
         old_vx[env_ids] = self.vel_command_b[env_ids, 0]
+
+    def _project_to_wheel_speed_limit(self, env_ids: torch.Tensor):
+        wheel_half_track = float(self.cfg.wheel_half_track)
+        wheel_radius = float(self.cfg.wheel_radius)
+        max_wheel_speed = float(self.cfg.max_wheel_speed)
+        command = self.vel_command_b[env_ids]
+        left = (command[:, 0] - wheel_half_track * command[:, 2]) / wheel_radius
+        right = (command[:, 0] + wheel_half_track * command[:, 2]) / wheel_radius
+        peak_speed = torch.maximum(left.abs(), right.abs())
+        scale = torch.clamp(max_wheel_speed / peak_speed.clamp_min(1.0e-6), max=1.0)
+        self.vel_command_b[env_ids] = command * scale[:, None]
 
     def _sample_lin_vel_x(self, num_samples: int) -> torch.Tensor:
         x_min, x_max = self.cfg.ranges.lin_vel_x
@@ -141,8 +225,14 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
             flip_vx = torch.clamp(target_sign * flip_abs, min=x_min, max=x_max)
             self.vel_command_b[env_ids, 0] = torch.where(flip_envs, flip_vx, self.vel_command_b[env_ids, 0])
 
-    def _sample_ang_vel_z(self, num_samples: int) -> torch.Tensor:
+    def _update_command(self):
+        super()._update_command()
+        self.command_age += self._env.step_dt
+
+    def _sample_ang_vel_z(self, num_samples: int, limit: float | None = None) -> torch.Tensor:
         z_min, z_max = self.cfg.ranges.ang_vel_z
+        if limit is not None:
+            z_min, z_max = max(z_min, -limit), min(z_max, limit)
         min_abs = min(abs(z_min), abs(z_max), self.cfg.min_abs_ang_vel_z)
         min_abs = max(min_abs, 0.0)
 
@@ -182,6 +272,10 @@ class PositiveBiasedVelocityCommandCfg(UniformVelocityCommandCfg):
     straight_command_prob: float = 0.3
     turn_command_prob: float = 0.5
     mixed_command_prob: float = 0.2
+    mixed_yaw_limit: float | None = None
+    wheel_radius: float = 0.055
+    wheel_half_track: float = 0.210335
+    max_wheel_speed: float = 20.0
     positive_lin_vel_x_prob: float = 0.7
     zero_lin_vel_x_prob: float = 0.05
     min_abs_lin_vel_x: float = 0.08
@@ -205,18 +299,24 @@ class PositiveBiasedVelocityCommandCfg(UniformVelocityCommandCfg):
 
 
 class UniformBaseHeightCommand(CommandTerm):
-    """Uniformly sampled base-height command."""
+    """Mix uniform heights with opposite-endpoint transitions."""
 
     cfg: "UniformBaseHeightCommandCfg"
 
     def __init__(self, cfg: "UniformBaseHeightCommandCfg", env):
         super().__init__(cfg, env)
         self.height_command = torch.zeros(self.num_envs, 1, device=self.device)
+        self.command_age = torch.zeros(self.num_envs, device=self.device)
         self._height_body_ids, _ = env.scene[cfg.asset_name].find_bodies(cfg.body_name)
         if len(self._height_body_ids) != 1:
             raise ValueError(f"Expected one height-tracking body: {cfg.body_name}")
         self._metric_steps = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["height_mae_cm"] = torch.zeros(self.num_envs, device=self.device)
+        for name in ("height_mae_cm", "height_bias_cm", "height_actual_cm", "height_target_cm"):
+            self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
+        self._height_bins = {
+            name: torch.zeros(self.num_envs, 4, device=self.device)
+            for name in ("low", "mid", "high")
+        }  # columns: count, actual, target, absolute error (cm)
 
     @property
     def command(self) -> torch.Tensor:
@@ -224,22 +324,65 @@ class UniformBaseHeightCommand(CommandTerm):
 
     def _update_metrics(self):
         height = self._env.scene[self.cfg.asset_name].data.body_pos_w[:, self._height_body_ids[0], 2]
-        error_cm = (height - self.command[:, 0]).abs() * 100.0
+        height = height - self.reference_ground_height()
+        error_cm = (height - self.command[:, 0]) * 100.0
         self._metric_steps += 1
-        self.metrics["height_mae_cm"] += (error_cm - self.metrics["height_mae_cm"]) / self._metric_steps
+        values = {
+            "height_mae_cm": error_cm.abs(),
+            "height_bias_cm": error_cm,
+            "height_actual_cm": height * 100.0,
+            "height_target_cm": self.command[:, 0] * 100.0,
+        }
+        for name, value in values.items():
+            self.metrics[name] += (value - self.metrics[name]) / self._metric_steps
+
+        low, high = self.cfg.height_range
+        target = self.command[:, 0]
+        lower, upper = low + (high - low) / 3, high - (high - low) / 3
+        samples = torch.stack((torch.ones_like(height), height * 100, target * 100, error_cm.abs()), -1)
+        for name, mask in (("low", target < lower), ("mid", (target >= lower) & (target <= upper)),
+                           ("high", target > upper)):
+            self._height_bins[name] += torch.where(mask[:, None], samples, 0.0)
 
     def reset(self, env_ids=None):
+        ids = slice(None) if env_ids is None else env_ids
+        grouped = {}
+        for name, samples in self._height_bins.items():
+            total = samples[ids].sum(dim=0)
+            grouped[f"height_{name}_sample_count"] = total[0].item()
+            for index, metric in enumerate(("actual", "target", "mae"), 1):
+                grouped[f"height_{name}_{metric}_cm"] = (total[index] / total[0].clamp_min(1)).item()
+            samples[ids] = 0
         extras = super().reset(env_ids)
-        self._metric_steps[slice(None) if env_ids is None else env_ids] = 0
+        extras.update(grouped)
+        self._metric_steps[ids] = 0
         return extras
 
+    def reference_ground_height(self):
+        """Local ground median shared by height metrics, rewards and observations."""
+        sensor_name = getattr(self.cfg, "ground_sensor_name", None)
+        if sensor_name is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        hits = self._env.scene[sensor_name].data.ray_hits_w[..., 2]
+        valid_hits = torch.where(torch.isfinite(hits), hits, torch.nan)
+        ground = torch.nanmedian(valid_hits, dim=-1).values
+        return torch.where(torch.isfinite(ground), ground, self._env.scene.env_origins[:, 2])
+
     def _resample_command(self, env_ids: Sequence[int]):
-        self.height_command[env_ids, 0] = torch.empty(len(env_ids), device=self.device).uniform_(
-            *self.cfg.height_range
-        )
+        low, high = self.cfg.height_range
+        self.command_age[env_ids] = 0.0
+        previous = self.height_command[env_ids, 0]
+        uniform = torch.empty(len(env_ids), device=self.device).uniform_(low, high)
+        # On episode reset choose either endpoint; otherwise switch across the midpoint.
+        initial = self._env.episode_length_buf[env_ids] == 0
+        choose_high = torch.where(initial, torch.rand(len(env_ids), device=self.device) < 0.5,
+                                  previous <= (low + high) / 2)
+        endpoint = torch.where(choose_high, high, low)
+        use_endpoint = torch.rand(len(env_ids), device=self.device) < self.cfg.endpoint_switch_prob
+        self.height_command[env_ids, 0] = torch.where(use_endpoint, endpoint, uniform)
 
     def _update_command(self):
-        pass
+        self.command_age += self._env.step_dt
 
 
 @configclass
@@ -250,3 +393,5 @@ class UniformBaseHeightCommandCfg(CommandTermCfg):
     asset_name: str = "robot"
     body_name: str = "chassis"
     height_range: tuple[float, float] = (0.28, 0.32)
+    endpoint_switch_prob: float = 0.0
+    ground_sensor_name: str | None = None

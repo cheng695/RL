@@ -40,6 +40,21 @@ class MyRobotRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class MyRobotRoughScanPPORunnerCfg(MyRobotRoughPPORunnerCfg):
+    experiment_name = "uz05_rough_scan"
+
+
+@configclass
+class MyRobotStepCoursePPORunnerCfg(MyRobotRoughPPORunnerCfg):
+    experiment_name = "uz05_step_course"
+
+
+@configclass
+class MyRobotStepsPPORunnerCfg(MyRobotRoughPPORunnerCfg):
+    experiment_name = "uz05_steps"
+
+
+@configclass
 class MyRobotFlatPPORunnerCfg(MyRobotRoughPPORunnerCfg):
     """RSL-RL PPO configuration for the UZ-05 flat velocity task."""
 

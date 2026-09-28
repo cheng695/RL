@@ -6,6 +6,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
+from isaaclab.utils.math import quat_apply
 
 
 def bad_roll_pitch(
@@ -29,8 +30,15 @@ def leg_tendon_length_out_of_range(
     """Terminate when either leg extension tendon is outside its allowed length range."""
     asset: Articulation = env.scene[asset_cfg.name]
     body_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
-    left_length = torch.linalg.norm(body_pos_w[:, 1] - body_pos_w[:, 0], dim=1)
-    right_length = torch.linalg.norm(body_pos_w[:, 3] - body_pos_w[:, 2], dim=1)
+    # Massless mount frames are fused into chassis. Hip anchors in chassis frame
+    # follow the original MJCF frame rotation (-90 degrees about Z).
+    quat = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    left_offset = body_pos_w.new_tensor([0.0, 0.210335, 0.0]).expand(env.num_envs, -1)
+    right_offset = body_pos_w.new_tensor([0.0, -0.210335, 0.0]).expand(env.num_envs, -1)
+    left_mount = body_pos_w[:, 0] + quat_apply(quat, left_offset)
+    right_mount = body_pos_w[:, 0] + quat_apply(quat, right_offset)
+    left_length = torch.linalg.norm(body_pos_w[:, 1] - left_mount, dim=1)
+    right_length = torch.linalg.norm(body_pos_w[:, 2] - right_mount, dim=1)
     lengths = torch.stack((left_length, right_length), dim=1)
     return torch.any((lengths < min_length - tolerance) | (lengths > max_length + tolerance), dim=1)
 

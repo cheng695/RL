@@ -10,9 +10,7 @@ class MyRobotFlatEnvCfg(MyRobotRoughEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # override rewards
-        self.rewards.orientation_tracking.weight = 3.0
-        self.rewards.torques.weight = -1.0e-4
+        # Inherit the shared reward tuning from RewardsCfg.
 
         # change terrain to flat
         self.scene.terrain.terrain_type = "plane"

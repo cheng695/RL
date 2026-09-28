@@ -42,7 +42,6 @@ ALL_JOINTS = CONTROLLED_JOINTS + PASSIVE_JOINTS
 BASE_BODY_NAME = "chassis"
 BASE_CONTACT_BODY_NAMES = [
     "chassis",
-    "legacy_y_forward_model_frame",
 ]
 WHEEL_BODY_NAMES = [
     "left_right_wheel",
@@ -50,9 +49,8 @@ WHEEL_BODY_NAMES = [
 ]
 
 LEG_EXTENSION_BODY_NAMES = [
-    "left_leg_mount",
+    "chassis",
     "left_right_wheel",
-    "right_leg_mount",
     "right_right_wheel",
 ]
 
@@ -61,6 +59,7 @@ MY_ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.MjcfFileCfg(
         func=spawn_closed_loop_mjcf,
         asset_path=str(ROBOT_MJCF_PATH),
+        force_usd_conversion=True,  # Converter also reads inertials from uz05.xml.
         import_sites=True,
         fix_base=False,
         make_instanceable=False,

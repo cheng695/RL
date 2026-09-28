@@ -57,6 +57,11 @@ def main() -> None:
     print(f"[INFO] step_dt: {env.unwrapped.step_dt}")
     print(f"[INFO] action_space: {env.action_space}")
     print(f"[INFO] observation type: {type(obs).__name__}")
+    for name, values in obs.items():
+        print(f"[INFO] observation {name}: {tuple(values.shape)}", flush=True)
+        assert torch.isfinite(values).all(), f"Non-finite initial observation: {name}"
+    height_term = env.unwrapped.command_manager.get_term("base_height")
+    print(f"[INFO] ground reference z: {height_term.reference_ground_height().tolist()}", flush=True)
     print(f"[INFO] action terms: {_term_names(env.unwrapped.action_manager)}")
     print(f"[INFO] command terms: {_term_names(env.unwrapped.command_manager)}")
     print(f"[INFO] reward terms: {_term_names(env.unwrapped.reward_manager)}")
@@ -71,7 +76,10 @@ def main() -> None:
         else:
             actions = torch.zeros((env.unwrapped.num_envs, action_dim), device=env.unwrapped.device)
 
-        _, rewards, terminated, truncated, _ = env.step(actions)
+        step_obs, rewards, terminated, truncated, _ = env.step(actions)
+        assert torch.isfinite(rewards).all(), "Non-finite rewards"
+        for name, values in step_obs.items():
+            assert torch.isfinite(values).all(), f"Non-finite observation: {name}"
         if step % 20 == 0 or step == args_cli.steps - 1:
             root_z = robot.data.root_pos_w[:, 2]
             tilt = torch.acos(torch.clamp(-robot.data.projected_gravity_b[:, 2], -1.0, 1.0))
@@ -84,6 +92,7 @@ def main() -> None:
                 f"done_count={int(done.sum().item())}"
             )
 
+    print("[INFO] Environment smoke check completed.", flush=True)
     env.close()
 
 

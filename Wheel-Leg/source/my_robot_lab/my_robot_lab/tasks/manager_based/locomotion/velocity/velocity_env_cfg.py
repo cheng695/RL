@@ -86,7 +86,7 @@ class CommandsCfg(IsaacLabCommandsCfg):
     base_velocity = my_commands.PositiveBiasedVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(2.0, 5.0),
-        rel_standing_envs=0.0,
+        rel_standing_envs=0.2,
         rel_heading_envs=0.0,
         heading_command=False,
         heading_control_stiffness=0.5,
@@ -94,25 +94,28 @@ class CommandsCfg(IsaacLabCommandsCfg):
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
             lin_vel_y=(0.0, 0.0),
-            ang_vel_z=(-1.0, 1.0),
+            ang_vel_z=(-5.0, 5.0),
             heading=None,
         ),
-        straight_command_prob=0.2,
-        turn_command_prob=0.7,
-        mixed_command_prob=0.1,
-        positive_lin_vel_x_prob=0.7,
+        straight_command_prob=0.5,
+        turn_command_prob=0.3,
+        mixed_command_prob=0.2,
+        # Mixed commands are projected by wheel speed, not component-clipped.
+        mixed_yaw_limit=None,
+        positive_lin_vel_x_prob=0.5,
         zero_lin_vel_x_prob=0.0,
         min_abs_lin_vel_x=0.08,
         min_abs_ang_vel_z=0.15,
-        abrupt_flip_prob=0.25,
+        abrupt_flip_prob=0.0,
         abrupt_flip_min_abs_lin_vel_x=0.6,
         abrupt_flip_max_abs_lin_vel_x=1.0,
     )
 
     base_height = my_commands.UniformBaseHeightCommandCfg(
         asset_name="robot",
-        resampling_time_range=(1.0e9, 1.0e9),
-        height_range=(0.28, 0.34),
+        resampling_time_range=(4.0, 8.0),
+        height_range=(0.25, 0.40),
+        endpoint_switch_prob=0.7,
     )
 
 
@@ -281,13 +284,15 @@ class RewardsCfg(IsaacLabRewardsCfg):
 
     vx_tracking = RewTerm(
         func=my_rewards.vx_tracking_gaussian,
-        weight=2.0,
+        # Prioritize translation after mass correction; retain the same precision kernel.
+        weight=4.0,
         params={"command_name": "base_velocity", "sigma": 0.35},
     )
 
     vx_tracking_huber = RewTerm(
         func=my_rewards.vx_tracking_huber,
-        weight=-0.1,
+        # Retain a stronger error signal outside the Gaussian's useful range.
+        weight=-1.2,
         params={"command_name": "base_velocity", "beta": 0.3, "max_value": 2.0},
     )
 
@@ -305,18 +310,9 @@ class RewardsCfg(IsaacLabRewardsCfg):
         params={"command_name": "base_velocity", "beta": 0.35, "max_value": 6.0},
     )
 
-    wheel_yaw_rate_consistency = RewTerm(
-        func=my_rewards.wheel_yaw_rate_consistency_l2,
-        weight=-0.04,
-        params={
-            "command_name": "base_velocity",
-            "wheel_base": 0.42067,
-            "wheel_radius": 0.055,
-            "max_value": 100.0,
-            "wheel_diff_sign": 1.0,
-            "asset_cfg": SceneEntityCfg("robot", joint_names=WHEEL_JOINTS, preserve_order=True),
-        },
-    )
+    # Use measured base yaw for tracking until the imported wheel joint signs
+    # have been verified in Isaac Lab. A wrong wheel constraint opposes turning.
+    wheel_yaw_rate_consistency = None
 
     wheel_vx_tracking = None
     wheel_vx_tracking_huber = None
@@ -332,13 +328,21 @@ class RewardsCfg(IsaacLabRewardsCfg):
     pitch_tracking = None
     pitch_rate = None
 
+    straight_pitch = RewTerm(
+        func=my_rewards.straight_pitch_deadband_l2,
+        weight=-0.5,
+        params={"command_name": "base_velocity", "height_command_name": "base_height",
+                "settle_time": 1.0, "deadband_rad": 0.05236,
+                "error_scale": 0.1, "max_value": 4.0},
+    )
+
     base_height_tracking = RewTerm(
         func=my_rewards.base_height_command_exp_kernel,
-        weight=1.0,
+        weight=3.0,
         params={
             "command_name": "base_height",
             "asset_cfg": SceneEntityCfg("robot", body_names=BASE_BODY_NAME),
-            "kernel_coeff": 200.0,
+            "kernel_coeff": 1000.0,
         },
     )
 
@@ -347,7 +351,7 @@ class RewardsCfg(IsaacLabRewardsCfg):
 
     base_height_l2 = RewTerm(
         func=my_rewards.base_height_command_l2,
-        weight=-0.2,
+        weight=-1.0,
         params={
             "command_name": "base_height",
             "error_scale": 0.05,
@@ -377,9 +381,17 @@ class RewardsCfg(IsaacLabRewardsCfg):
         },
     )
 
+    stand_still_drift = RewTerm(
+        func=my_rewards.stand_still_drift_huber,
+        weight=-0.2,
+        params={"command_name": "base_velocity", "command_deadband": 1.0e-6,
+                "velocity_scale": 0.05, "max_value": 10.0},
+    )
+
     torques = RewTerm(
         func=my_rewards.joint_torques_l2,
-        weight=-1.0e-4,
+        # Relax effort regularization while learning height and vx tracking.
+        weight=-5.0e-5,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINTS, preserve_order=True),
             "max_value": 1.0e5,
@@ -423,23 +435,22 @@ class RewardsCfg(IsaacLabRewardsCfg):
     )
 
     # -- anti-squat: penalize motion of the leg joints themselves
-    # Conservative version (default). Targets periodic leg pumping directly;
-    # wheels are untouched so balancing and vx tracking are unaffected.
+    # Keep this weak: leg motion also supports height changes and recovery.
     leg_joint_vel_l2 = RewTerm(
         func=my_rewards.leg_joint_vel_l2,
-        weight=-0.03,
+        weight=-0.01,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINTS, preserve_order=True),
             "max_value": 1.0e3,
         },
     )
 
-    # Stronger suppression: set the plain term above to None and enable this one
-    # instead. The gate relaxes the penalty while the height error is large, so
+    # Optional height-dependent relaxation: disable the plain term first.
+    # At equal weights this gate can only reduce the penalty, not strengthen it;
     # active base_height command transitions stay cheap.
     # leg_joint_vel_l2_height_gated = RewTerm(
     #     func=my_rewards.leg_joint_vel_l2_height_gated,
-    #     weight=-0.03,
+    #     weight=-0.01,
     #     params={
     #         "command_name": "base_height",
     #         "gate_sigma": 0.03,

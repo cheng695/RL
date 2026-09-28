@@ -85,10 +85,10 @@ def vx_tracking_huber(
     max_value: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward velocity Huber penalty; keeps useful gradient when the error is large."""
+    """Forward velocity Huber penalty; distinguishes large errors until the cap."""
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
-    error = torch.nan_to_num(asset.data.root_lin_vel_b[:, 0] - command[:, 0], nan=0.0, posinf=0.0, neginf=0.0)
+    error = asset.data.root_lin_vel_b[:, 0] - command[:, 0]
     abs_error = torch.abs(error)
     beta = max(float(beta), 1.0e-6)
     loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
@@ -186,7 +186,7 @@ def wheel_vx_tracking_huber(
     right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
     wheel_forward_vel = 0.5 * (left_wheel_vel - right_wheel_vel)
     vx_from_wheels = float(wheel_radius) * wheel_forward_vel
-    error = torch.nan_to_num(vx_from_wheels - command[:, 0], nan=0.0, posinf=0.0, neginf=0.0)
+    error = vx_from_wheels - command[:, 0]
     abs_error = torch.abs(error)
     beta = max(float(beta), 1.0e-6)
     loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
@@ -208,7 +208,7 @@ def base_wheel_vx_consistency_huber(
     right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
     wheel_forward_vel = 0.5 * (left_wheel_vel - right_wheel_vel)
     vx_from_wheels = float(wheel_radius) * wheel_forward_vel
-    error = torch.nan_to_num(asset.data.root_lin_vel_b[:, 0] - vx_from_wheels, nan=0.0, posinf=0.0, neginf=0.0)
+    error = asset.data.root_lin_vel_b[:, 0] - vx_from_wheels
     abs_error = torch.abs(error)
     beta = max(float(beta), 1.0e-6)
     loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
@@ -224,6 +224,28 @@ def orientation_exp_kernel(
     asset: Articulation = env.scene[asset_cfg.name]
     roll_pitch_error_sq = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
     return _finite_or_penalty(torch.exp(-kernel_coeff * roll_pitch_error_sq), penalty=0.0)
+
+
+def straight_pitch_deadband_l2(
+    env, command_name: str, height_command_name: str, settle_time: float,
+    deadband_rad: float, error_scale: float, max_value: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Discourage persistent straight-line lean, with grace after either command changes.
+
+    Command age is a transition guard, not proof that physical acceleration ended.
+    """
+    velocity_term = env.command_manager.get_term(command_name)
+    height_term = env.command_manager.get_term(height_command_name)
+    command = velocity_term.command
+    active = ((command[:, 0].abs() > 1e-6) & (command[:, 2].abs() <= 1e-6)
+              & (velocity_term.command_age >= settle_time)
+              & (height_term.command_age >= settle_time))
+    gravity = env.scene[asset_cfg.name].data.projected_gravity_b
+    pitch = torch.atan2(gravity[:, 0], torch.linalg.vector_norm(gravity[:, 1:], dim=-1))
+    excess = (pitch.abs() - deadband_rad).clamp_min(0.0)
+    cost = _finite_or_penalty((excess / error_scale).square().clamp(max=max_value), penalty=max_value)
+    return torch.where(active, cost, torch.zeros_like(cost))
 
 
 def pitch_tracking_gaussian(
@@ -279,9 +301,12 @@ def base_height_command_exp_kernel(
     command_name: str,
     kernel_coeff: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    relative_to_ground: bool = False,
 ) -> torch.Tensor:
     """Track commanded base height with exp(-k * error^2)."""
     body_height = _body_height_w(env, asset_cfg)
+    if relative_to_ground:
+        body_height = body_height - env.command_manager.get_term(command_name).reference_ground_height()
     command = env.command_manager.get_command(command_name)
     error_sq = torch.square(body_height - command[:, 0])
     return _finite_or_penalty(torch.exp(-kernel_coeff * error_sq), penalty=0.0)
@@ -305,9 +330,12 @@ def base_height_command_l2(
     error_scale: float,
     max_value: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    relative_to_ground: bool = False,
 ) -> torch.Tensor:
     """Penalize normalized commanded base-height tracking error."""
     body_height = _body_height_w(env, asset_cfg)
+    if relative_to_ground:
+        body_height = body_height - env.command_manager.get_term(command_name).reference_ground_height()
     command = env.command_manager.get_command(command_name)
     scaled_error = (body_height - command[:, 0]) / error_scale
     value = torch.square(scaled_error)
@@ -342,9 +370,32 @@ def stand_still_lin_vel_l2(
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     no_lin_command = torch.abs(command[:, 0]) <= command_deadband
-    lin_vel_xy = torch.nan_to_num(asset.data.root_lin_vel_b[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+    lin_vel_xy = asset.data.root_lin_vel_b[:, :2]
     value = torch.where(no_lin_command, torch.sum(torch.square(lin_vel_xy), dim=1), torch.zeros_like(command[:, 0]))
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
+
+
+def stand_still_drift_huber(
+    env,
+    command_name: str,
+    command_deadband: float,
+    velocity_scale: float,
+    max_value: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Scale-aware horizontal drift cost only for zero translation AND yaw commands.
+
+    Smooth near zero and linear for larger speeds, allowing braking and balance
+    recovery without imposing a joint-motion or vertical-velocity penalty.
+    """
+    if velocity_scale <= 0.0:
+        raise ValueError("velocity_scale must be positive")
+    command = env.command_manager.get_command(command_name)
+    standing = (command[:, :3].abs() <= command_deadband).all(dim=-1)
+    speed = env.scene[asset_cfg.name].data.root_lin_vel_b[:, :2].abs() / velocity_scale
+    cost = torch.where(speed < 1.0, 0.5 * speed.square(), speed - 0.5).sum(dim=-1)
+    cost = _finite_or_penalty(cost.clamp(max=max_value), penalty=max_value)
+    return torch.where(standing, cost, torch.zeros_like(cost))
 
 
 def joint_torques_l2(
@@ -367,7 +418,9 @@ def wheel_power_l1_positive(
     asset: Articulation = env.scene[asset_cfg.name]
     torque = asset.data.applied_torque[:, asset_cfg.joint_ids]
     joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
-    power = torch.nan_to_num(torque * joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+    power = torque * joint_vel
+    # Invalid power must not disappear as zero consumption (including -Inf).
+    power = _finite_or_penalty(power, penalty=max_value)
     value = torch.sum(torch.clamp(power, min=0.0), dim=1)
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 
@@ -434,7 +487,6 @@ def action_rate_l2(
     if action_slice is not None:
         start, stop = action_slice
         action_delta = action_delta[:, start:stop]
-    action_delta = torch.nan_to_num(action_delta, nan=0.0, posinf=0.0, neginf=0.0)
     value = torch.sum(torch.square(action_delta), dim=1)
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 
@@ -456,6 +508,10 @@ def action_second_order_l2(
     ):
         prev_action = env.action_manager.prev_action
         prev_prev_action = env._my_robot_prev_prev_action
+        # ManagerBasedRLEnv increments episode lengths before reward evaluation.
+        # On the first step after reset, action_manager has zeroed its history;
+        # clear our extra history only for those environments as well.
+        prev_prev_action[env.episode_length_buf <= 1] = 0.0
         env._my_robot_action_second_order_cache = action - 2.0 * prev_action + prev_prev_action
         env._my_robot_action_second_order_cache_step = step
         env._my_robot_prev_prev_action = prev_action.clone()
@@ -464,7 +520,6 @@ def action_second_order_l2(
     if action_slice is not None:
         start, stop = action_slice
         second_order = second_order[:, start:stop]
-    second_order = torch.nan_to_num(second_order, nan=0.0, posinf=0.0, neginf=0.0)
     value = torch.sum(torch.square(second_order), dim=1)
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 

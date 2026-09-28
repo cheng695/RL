@@ -25,17 +25,35 @@ parser.add_argument("--task", type=str, default="MyRobot-Velocity-Flat-v0", help
 parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments.")
 parser.add_argument("--seed", type=int, default=None, help="Random seed. Use -1 for a random seed.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Override PPO training iterations.")
+parser.add_argument("--transfer_from", type=str, default=None, help="Initialize expanded terrain policy from a 49D flat checkpoint; fresh optimizer.")
 parser.add_argument(
     "--reset_noise_std", type=float, default=None,
     help="Reset policy exploration std after loading a checkpoint (e.g. 0.5).",
 )
+parser.add_argument("--video", action="store_true", help="Record training videos periodically.")
+parser.add_argument(
+    "--video_interval", type=int, default=500,
+    help="Record one video every N PPO iterations (requires --video).",
+)
+parser.add_argument(
+    "--video_length", type=int, default=500,
+    help="Length of each training video in simulation steps.",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.transfer_from and args_cli.resume:
+    parser.error("Use --transfer_from for input expansion OR --resume for an existing terrain model")
 if args_cli.reset_noise_std is not None and (
     not math.isfinite(args_cli.reset_noise_std) or args_cli.reset_noise_std <= 0
 ):
     parser.error("--reset_noise_std must be finite and positive")
+if args_cli.video and args_cli.video_interval <= 0:
+    parser.error("--video_interval must be positive")
+if args_cli.video and args_cli.video_length <= 0:
+    parser.error("--video_length must be positive")
+if args_cli.video:
+    args_cli.enable_cameras = True
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -87,9 +105,30 @@ def main() -> None:
 
     resume_path = None
     if agent_cfg.resume:
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if os.path.isabs(agent_cfg.load_checkpoint):
+            if not os.path.isfile(agent_cfg.load_checkpoint):
+                raise FileNotFoundError(agent_cfg.load_checkpoint)
+            resume_path = agent_cfg.load_checkpoint
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    env = gym.make(args_cli.task, cfg=env_cfg)
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    if args_cli.video:
+        # RecordVideo counts env.step() calls, while the user-facing interval is
+        # expressed in PPO iterations. One iteration contains num_steps_per_env
+        # rollout steps, so convert once after the runner config is available.
+        video_interval_steps = args_cli.video_interval * agent_cfg.num_steps_per_env
+        video_folder = os.path.join(log_dir, "videos", "train")
+        video_kwargs = {
+            "video_folder": video_folder,
+            "step_trigger": lambda step: step % video_interval_steps == 0,
+            "video_length": args_cli.video_length,
+            "disable_logger": True,
+        }
+        print(f"[INFO] Recording videos every {args_cli.video_interval} PPO iterations.")
+        print(f"[INFO] Video folder: {video_folder}")
+        env = gym.wrappers.RecordVideo(env, **video_kwargs)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     runner.add_git_repo_to_log(__file__)
@@ -97,6 +136,9 @@ def main() -> None:
     if resume_path is not None:
         print(f"[INFO] Loading checkpoint: {resume_path}")
         runner.load(resume_path)
+    if args_cli.transfer_from:
+        from transfer_policy import transfer_flat
+        transfer_flat(runner, args_cli.transfer_from)
 
     if args_cli.reset_noise_std is not None:
         policy = runner.alg.get_policy()
@@ -117,10 +159,17 @@ def main() -> None:
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    dump_yaml(os.path.join(log_dir, "params", "launch.yaml"), {"reset_noise_std": args_cli.reset_noise_std})
+    dump_yaml(os.path.join(log_dir, "params", "launch.yaml"), {
+        "reset_noise_std": args_cli.reset_noise_std,
+        "transfer_from": args_cli.transfer_from,
+        "video": args_cli.video,
+        "video_interval": args_cli.video_interval,
+        "video_length": args_cli.video_length,
+    })
 
     start_time = time.time()
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations,
+                 init_at_random_ep_len="Step-Course" not in args_cli.task)
     print(f"[INFO] Training time: {time.time() - start_time:.2f} seconds")
     env.close()
 

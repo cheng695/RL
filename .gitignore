@@ -1,0 +1,69 @@
+# Python caches and test/type-checking artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python environments and package build artifacts
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+pip-wheel-metadata/
+
+# Reinforcement-learning training outputs
+/logs/
+/runs/
+/outputs/
+/output/
+/videos/
+/recordings/
+/wandb/
+/.neptune/
+tensorboard/
+events.out.tfevents.*
+
+# Generated diagnostics and temporary exports
+*.npz
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Isaac Sim / Omniverse local state
+*.dmp
+_isaac_sim*/
+_repo/
+_build/
+.lastformat
+.thumbs/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+

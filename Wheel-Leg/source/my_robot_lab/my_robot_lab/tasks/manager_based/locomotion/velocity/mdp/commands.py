@@ -96,6 +96,19 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
             ).item()
             # A zero count means the corresponding MAE is unavailable, not perfect.
             mode_metrics[f"{mode}_sample_count"] = count.item()
+        # Carry sufficient statistics through the runner; averaging per-reset
+        # means would give empty groups and small batches the wrong weight.
+        for name, numerator, denominator in (
+            ("stand_vx_bias_mps", standing[1], standing[0]),
+            ("stand_speed_xy_mps", standing[2], standing[0]),
+            ("stand_path_length_m", standing[3], (self._standing_sums[ids, 0] > 0).sum()),
+        ):
+            mode_metrics[f"__sum__{name}"] = numerator.item()
+            mode_metrics[f"__count__{name}"] = denominator.item()
+        for mode in self._mode_steps:
+            name = f"vx_mae_{mode}_mps"
+            mode_metrics[f"__sum__{name}"] = self._mode_error_sums[mode][ids].sum().item()
+            mode_metrics[f"__count__{name}"] = self._mode_steps[mode][ids].sum().item()
         extras = super().reset(env_ids)
         extras.update(mode_metrics)
         self._metric_steps[ids] = 0
@@ -164,11 +177,6 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
             self._apply_abrupt_lin_vel_x_flips(linear_env_ids)
         if len(yaw_env_ids) > 0:
             self.vel_command_b[yaw_env_ids, 2] = self._sample_ang_vel_z(len(yaw_env_ids))
-        mixed_ids = env_ids[mixed_envs]
-        if self.cfg.mixed_yaw_limit is not None and len(mixed_ids) > 0:
-            self.vel_command_b[mixed_ids, 2] = self._sample_ang_vel_z(
-                len(mixed_ids), self.cfg.mixed_yaw_limit)
-
         # Project the requested body twist onto the differential-drive wheel-speed
         # workspace.  Both vx and yaw use the same factor, so the requested motion
         # direction is preserved instead of clipping the two components separately.
@@ -196,16 +204,31 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
         min_abs = min(abs(x_min), abs(x_max), self.cfg.min_abs_lin_vel_x)
         min_abs = max(min_abs, 0.0)
 
-        random_values = torch.rand(num_samples, device=self.device)
-        positive_envs = random_values < self.cfg.positive_lin_vel_x_prob
+        low_prob = float(self.cfg.low_speed_command_prob)
+        medium_prob = float(self.cfg.medium_speed_command_prob)
+        high_prob = float(self.cfg.high_speed_command_prob)
+        prob_sum = low_prob + medium_prob + high_prob
+        if min(low_prob, medium_prob, high_prob) < 0.0 or prob_sum <= 0.0:
+            raise ValueError("Linear speed-band probabilities must be non-negative and have a positive sum.")
 
-        pos_low = min(min_abs, max(x_max, 0.0))
-        pos_high = max(x_max, pos_low)
-        neg_low = min(x_min, -min_abs)
-        neg_high = max(min(-min_abs, 0.0), neg_low)
+        band_draw = torch.rand(num_samples, device=self.device) * prob_sum
 
-        pos_samples = torch.empty(num_samples, device=self.device).uniform_(pos_low, pos_high)
-        neg_samples = torch.empty(num_samples, device=self.device).uniform_(neg_low, neg_high)
+        def sample_magnitude(max_abs: float) -> torch.Tensor:
+            lower = min(min_abs, max_abs)
+            low_end = min(max(float(self.cfg.low_speed_max_abs_lin_vel_x), lower), max_abs)
+            medium_end = min(max(float(self.cfg.medium_speed_max_abs_lin_vel_x), low_end), max_abs)
+            low_samples = torch.empty(num_samples, device=self.device).uniform_(lower, low_end)
+            medium_samples = torch.empty(num_samples, device=self.device).uniform_(low_end, medium_end)
+            high_samples = torch.empty(num_samples, device=self.device).uniform_(medium_end, max_abs)
+            return torch.where(
+                band_draw < low_prob,
+                low_samples,
+                torch.where(band_draw < low_prob + medium_prob, medium_samples, high_samples),
+            )
+
+        pos_samples = sample_magnitude(max(x_max, 0.0))
+        neg_samples = -sample_magnitude(max(-x_min, 0.0))
+        positive_envs = torch.rand(num_samples, device=self.device) < self.cfg.positive_lin_vel_x_prob
         return torch.where(positive_envs, pos_samples, neg_samples)
 
     def _apply_abrupt_lin_vel_x_flips(self, env_ids: torch.Tensor):
@@ -229,21 +252,44 @@ class PositiveBiasedVelocityCommand(UniformVelocityCommand):
         super()._update_command()
         self.command_age += self._env.step_dt
 
-    def _sample_ang_vel_z(self, num_samples: int, limit: float | None = None) -> torch.Tensor:
+    def _sample_ang_vel_z(self, num_samples: int) -> torch.Tensor:
         z_min, z_max = self.cfg.ranges.ang_vel_z
-        if limit is not None:
-            z_min, z_max = max(z_min, -limit), min(z_max, limit)
         min_abs = min(abs(z_min), abs(z_max), self.cfg.min_abs_ang_vel_z)
         min_abs = max(min_abs, 0.0)
 
-        pos_low = min(min_abs, max(z_max, 0.0))
-        pos_high = max(z_max, pos_low)
-        neg_low = min(z_min, -min_abs)
-        neg_high = max(min(-min_abs, 0.0), neg_low)
+        low_prob = float(self.cfg.low_yaw_command_prob)
+        medium_prob = float(self.cfg.medium_yaw_command_prob)
+        high_prob = float(self.cfg.high_yaw_command_prob)
+        very_high_prob = float(self.cfg.very_high_yaw_command_prob)
+        prob_sum = low_prob + medium_prob + high_prob + very_high_prob
+        if min(low_prob, medium_prob, high_prob, very_high_prob) < 0.0 or prob_sum <= 0.0:
+            raise ValueError("Yaw speed-band probabilities must be non-negative and have a positive sum.")
 
+        band_draw = torch.rand(num_samples, device=self.device) * prob_sum
+
+        def sample_magnitude(max_abs: float) -> torch.Tensor:
+            lower = min(min_abs, max_abs)
+            low_end = min(max(float(self.cfg.low_yaw_max_abs_ang_vel_z), lower), max_abs)
+            medium_end = min(max(float(self.cfg.medium_yaw_max_abs_ang_vel_z), low_end), max_abs)
+            high_end = min(max(float(self.cfg.high_yaw_max_abs_ang_vel_z), medium_end), max_abs)
+            low_samples = torch.empty(num_samples, device=self.device).uniform_(lower, low_end)
+            medium_samples = torch.empty(num_samples, device=self.device).uniform_(low_end, medium_end)
+            high_samples = torch.empty(num_samples, device=self.device).uniform_(medium_end, high_end)
+            very_high_samples = torch.empty(num_samples, device=self.device).uniform_(high_end, max_abs)
+            return torch.where(
+                band_draw < low_prob,
+                low_samples,
+                torch.where(
+                    band_draw < low_prob + medium_prob,
+                    medium_samples,
+                    torch.where(band_draw < low_prob + medium_prob + high_prob,
+                                high_samples, very_high_samples),
+                ),
+            )
+
+        pos_samples = sample_magnitude(max(z_max, 0.0))
+        neg_samples = -sample_magnitude(max(-z_min, 0.0))
         positive_turn = torch.rand(num_samples, device=self.device) < 0.5
-        pos_samples = torch.empty(num_samples, device=self.device).uniform_(pos_low, pos_high)
-        neg_samples = torch.empty(num_samples, device=self.device).uniform_(neg_low, neg_high)
         return torch.where(positive_turn, pos_samples, neg_samples)
 
     def _yaw_marker_position(self, offset_b: tuple[float, float, float]) -> torch.Tensor:
@@ -272,14 +318,25 @@ class PositiveBiasedVelocityCommandCfg(UniformVelocityCommandCfg):
     straight_command_prob: float = 0.3
     turn_command_prob: float = 0.5
     mixed_command_prob: float = 0.2
-    mixed_yaw_limit: float | None = None
     wheel_radius: float = 0.055
     wheel_half_track: float = 0.210335
-    max_wheel_speed: float = 20.0
+    max_wheel_speed: float = 50.0
     positive_lin_vel_x_prob: float = 0.7
     zero_lin_vel_x_prob: float = 0.05
     min_abs_lin_vel_x: float = 0.08
+    low_speed_max_abs_lin_vel_x: float = 0.5
+    medium_speed_max_abs_lin_vel_x: float = 1.0
+    low_speed_command_prob: float = 0.6
+    medium_speed_command_prob: float = 0.25
+    high_speed_command_prob: float = 0.15
     min_abs_ang_vel_z: float = 0.2
+    low_yaw_max_abs_ang_vel_z: float = 1.0
+    medium_yaw_max_abs_ang_vel_z: float = 2.5
+    high_yaw_max_abs_ang_vel_z: float = 5.0
+    low_yaw_command_prob: float = 0.6
+    medium_yaw_command_prob: float = 0.25
+    high_yaw_command_prob: float = 0.1
+    very_high_yaw_command_prob: float = 0.05
     abrupt_flip_prob: float = 0.25
     abrupt_flip_min_abs_lin_vel_x: float = 0.6
     abrupt_flip_max_abs_lin_vel_x: float = 1.0
@@ -324,7 +381,8 @@ class UniformBaseHeightCommand(CommandTerm):
 
     def _update_metrics(self):
         height = self._env.scene[self.cfg.asset_name].data.body_pos_w[:, self._height_body_ids[0], 2]
-        height = height - self.reference_ground_height()
+        from .observations import local_ground_height
+        height = height - local_ground_height(self._env)
         error_cm = (height - self.command[:, 0]) * 100.0
         self._metric_steps += 1
         values = {
@@ -351,22 +409,15 @@ class UniformBaseHeightCommand(CommandTerm):
             total = samples[ids].sum(dim=0)
             grouped[f"height_{name}_sample_count"] = total[0].item()
             for index, metric in enumerate(("actual", "target", "mae"), 1):
-                grouped[f"height_{name}_{metric}_cm"] = (total[index] / total[0].clamp_min(1)).item()
+                key = f"height_{name}_{metric}_cm"
+                grouped[key] = (total[index] / total[0].clamp_min(1)).item()
+                grouped[f"__sum__{key}"] = total[index].item()
+                grouped[f"__count__{key}"] = total[0].item()
             samples[ids] = 0
         extras = super().reset(env_ids)
         extras.update(grouped)
         self._metric_steps[ids] = 0
         return extras
-
-    def reference_ground_height(self):
-        """Local ground median shared by height metrics, rewards and observations."""
-        sensor_name = getattr(self.cfg, "ground_sensor_name", None)
-        if sensor_name is None:
-            return torch.zeros(self.num_envs, device=self.device)
-        hits = self._env.scene[sensor_name].data.ray_hits_w[..., 2]
-        valid_hits = torch.where(torch.isfinite(hits), hits, torch.nan)
-        ground = torch.nanmedian(valid_hits, dim=-1).values
-        return torch.where(torch.isfinite(ground), ground, self._env.scene.env_origins[:, 2])
 
     def _resample_command(self, env_ids: Sequence[int]):
         low, high = self.cfg.height_range
@@ -394,4 +445,3 @@ class UniformBaseHeightCommandCfg(CommandTermCfg):
     body_name: str = "chassis"
     height_range: tuple[float, float] = (0.28, 0.32)
     endpoint_switch_prob: float = 0.0
-    ground_sensor_name: str | None = None

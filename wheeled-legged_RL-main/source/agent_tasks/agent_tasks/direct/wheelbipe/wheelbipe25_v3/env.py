@@ -2029,8 +2029,13 @@ class Wheelbipe25V3Env(DirectRLEnv):
         self.use_wheel_vel_control = getattr(self.cfg, 'use_wheel_vel_control', False)
         if self.use_wheel_vel_control:
             self.wheel_action_scale = getattr(self.cfg, 'wheel_vel_action_scale', 10.0)
-            self.max_wheel_vel = getattr(self.cfg, 'max_wheel_vel', 60.0)*1.5
-            print(f'[WheelCtrl] 轮速控制模式已启用: scale={self.wheel_action_scale}, max_vel={self.max_wheel_vel} rad/s')
+            self.max_wheel_vel = getattr(self.cfg, 'max_wheel_vel', 60.0)
+            self.max_wheel_acceleration = getattr(self.cfg, 'max_wheel_acceleration', 200.0)
+            print(
+                f'[WheelCtrl] 轮速控制模式已启用: scale={self.wheel_action_scale}, '
+                f'max_vel={self.max_wheel_vel} rad/s, '
+                f'max_acceleration={self.max_wheel_acceleration} rad/s^2'
+            )
         else:
             self.wheel_action_scale = self.cfg.wheel_action_scale
             print(f'[WheelCtrl] 力矩控制模式（默认）: scale={self.wheel_action_scale}')
@@ -2042,6 +2047,10 @@ class Wheelbipe25V3Env(DirectRLEnv):
         self._legs_act_idx, self._legs_act_idx_name = self.robot.find_joints(self.cfg.legs_act_name)
         self._legs_inact_idx, _ = self.robot.find_joints(self.cfg.legs_inact_name)
         self._wheel_idx, _ =  self.robot.find_joints(self.cfg.wheel_name)
+        if self.use_wheel_vel_control:
+            self.previous_wheel_target = torch.zeros(
+                self.num_envs, len(self._wheel_idx), dtype=torch.float, device=self.device
+            )
         self._actuate_idx = self._legs_act_idx + self._wheel_idx
         self._legs_front_idx, _ = self.robot.find_joints(".*_front1_joint")
         self._legs_rear_idx, _ = self.robot.find_joints(".*_rear1_joint")
@@ -2883,14 +2892,22 @@ class Wheelbipe25V3Env(DirectRLEnv):
             if self.use_self_act_noise and "wheel_actions" in self.self_act_noise:
                 wheel_actions_deal = self.self_act_noise["wheel_actions"](wheel_actions_deal)
             if self.use_wheel_vel_control:
-                # 轮速控制模式：policy 输出目标角速度，夹紧到 ±max_wheel_vel
-                wheel_actions_deal = torch.clamp(
+                # 限制策略期望轮速到硬件上限，再限制每个控制周期的速度变化率。
+                wheel_target_raw = torch.clamp(
                     wheel_actions_deal,
                     -self.max_wheel_vel,
                     self.max_wheel_vel,
                 )
+                max_wheel_delta = self.max_wheel_acceleration * self.step_dt
+                limited_wheel_target = self.previous_wheel_target + torch.clamp(
+                    wheel_target_raw - self.previous_wheel_target,
+                    -max_wheel_delta,
+                    max_wheel_delta,
+                )
                 if self.use_act_delay:
-                    wheel_actions_deal = self.act_delay['wheel_actions'].compute(wheel_actions_deal)
+                    limited_wheel_target = self.act_delay['wheel_actions'].compute(limited_wheel_target)
+                wheel_actions_deal = limited_wheel_target
+                self.previous_wheel_target[enable_env_ids] = limited_wheel_target[enable_env_ids]
                 # 设置速度目标
                 self.robot.set_joint_velocity_target(wheel_actions_deal[enable_env_ids], joint_ids=self._wheel_idx, env_ids=enable_env_ids)
                 # 对目标位置做 damping：将当前轮位置作为位置目标，
@@ -5041,6 +5058,8 @@ class Wheelbipe25V3Env(DirectRLEnv):
 
         self.robot.reset(env_ids)
         super()._reset_idx(env_ids)
+        if self.use_wheel_vel_control:
+            self.previous_wheel_target[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._before_previous_actions[env_ids] = 0.0

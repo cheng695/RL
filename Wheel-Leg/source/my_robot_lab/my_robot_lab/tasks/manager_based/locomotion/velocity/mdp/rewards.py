@@ -12,51 +12,8 @@ def _body_height_w(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     body_height = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]
     if body_height.ndim > 1:
         body_height = torch.mean(body_height, dim=1)
-    return body_height
-
-
-def base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """Penalize squared error between the selected body height and the target height."""
-
-    body_height = _body_height_w(env, asset_cfg)
-    return torch.square(body_height - target_height)
-
-
-def _sampled_base_height_target(env, target_height_range: tuple[float, float]) -> torch.Tensor:
-    lower, upper = target_height_range
-    device = env.device
-    num_envs = env.num_envs
-    target = getattr(env, "_my_robot_base_height_target", None)
-    if target is None or target.shape[0] != num_envs:
-        target = torch.empty(num_envs, device=device)
-        setattr(env, "_my_robot_base_height_target", target)
-        reset_ids = torch.arange(num_envs, device=device)
-    else:
-        reset_ids = torch.nonzero(env.episode_length_buf == 0, as_tuple=False).squeeze(-1)
-
-    if reset_ids.numel() > 0:
-        target[reset_ids] = torch.empty(reset_ids.numel(), device=device).uniform_(lower, upper)
-    return target
-
-
-def track_base_height_exp(
-    env,
-    std: float,
-    target_height: float | None = None,
-    target_height_range: tuple[float, float] | None = None,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Reward selected body height tracking with an exponential kernel."""
-
-    body_height = _body_height_w(env, asset_cfg)
-    if target_height_range is not None:
-        target = _sampled_base_height_target(env, target_height_range)
-    elif target_height is not None:
-        target = target_height
-    else:
-        raise ValueError("Either target_height or target_height_range must be provided.")
-    height_error = torch.square(body_height - target)
-    return torch.exp(-height_error / std**2)
+    from .observations import local_ground_height
+    return body_height - local_ground_height(env)
 
 
 def _finite_or_penalty(value: torch.Tensor, penalty: float) -> torch.Tensor:
@@ -126,93 +83,15 @@ def yaw_tracking_huber(
     return _finite_or_penalty(torch.clamp(loss, max=max_value), penalty=max_value)
 
 
-def wheel_yaw_rate_consistency_l2(
+def lateral_velocity_l2(
     env,
-    command_name: str,
-    wheel_base: float,
-    wheel_radius: float,
     max_value: float,
-    wheel_diff_sign: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalize mismatch between commanded yaw rate and wheel differential velocity."""
+    """Penalize sideways base motion for a no-sideways-command task."""
     asset: Articulation = env.scene[asset_cfg.name]
-    if len(asset_cfg.joint_ids) != 2:
-        raise ValueError("wheel_yaw_rate_consistency_l2 expects two wheel joints ordered [left, right].")
-    command = env.command_manager.get_command(command_name)
-    left_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[0]]
-    right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
-    wheel_diff = float(wheel_diff_sign) * (right_wheel_vel - left_wheel_vel)
-    target_wheel_diff = float(wheel_base) / float(wheel_radius) * command[:, 2]
-    value = torch.square(wheel_diff - target_wheel_diff)
-    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
-
-
-def wheel_vx_tracking_gaussian(
-    env,
-    command_name: str,
-    wheel_radius: float,
-    sigma: float,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Track commanded vx using the common wheel rolling speed."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    if len(asset_cfg.joint_ids) != 2:
-        raise ValueError("wheel_vx_tracking_gaussian expects two wheel joints ordered [left, right].")
-    command = env.command_manager.get_command(command_name)
-    left_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[0]]
-    right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
-    wheel_forward_vel = 0.5 * (left_wheel_vel - right_wheel_vel)
-    vx_from_wheels = float(wheel_radius) * wheel_forward_vel
-    error = vx_from_wheels - command[:, 0]
-    sigma_sq = max(float(sigma) ** 2, 1.0e-6)
-    return _finite_or_penalty(torch.exp(-torch.square(error) / sigma_sq), penalty=0.0)
-
-
-def wheel_vx_tracking_huber(
-    env,
-    command_name: str,
-    wheel_radius: float,
-    beta: float,
-    max_value: float,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Huber penalty between commanded vx and wheel-implied vx."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    if len(asset_cfg.joint_ids) != 2:
-        raise ValueError("wheel_vx_tracking_huber expects two wheel joints ordered [left, right].")
-    command = env.command_manager.get_command(command_name)
-    left_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[0]]
-    right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
-    wheel_forward_vel = 0.5 * (left_wheel_vel - right_wheel_vel)
-    vx_from_wheels = float(wheel_radius) * wheel_forward_vel
-    error = vx_from_wheels - command[:, 0]
-    abs_error = torch.abs(error)
-    beta = max(float(beta), 1.0e-6)
-    loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
-    return _finite_or_penalty(torch.clamp(loss, max=max_value), penalty=max_value)
-
-
-def base_wheel_vx_consistency_huber(
-    env,
-    wheel_radius: float,
-    beta: float,
-    max_value: float,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Penalize mismatch between base vx and wheel rolling velocity."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    if len(asset_cfg.joint_ids) != 2:
-        raise ValueError("base_wheel_vx_consistency_huber expects two wheel joints ordered [left, right].")
-    left_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[0]]
-    right_wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids[1]]
-    wheel_forward_vel = 0.5 * (left_wheel_vel - right_wheel_vel)
-    vx_from_wheels = float(wheel_radius) * wheel_forward_vel
-    error = asset.data.root_lin_vel_b[:, 0] - vx_from_wheels
-    abs_error = torch.abs(error)
-    beta = max(float(beta), 1.0e-6)
-    loss = torch.where(abs_error < beta, 0.5 * torch.square(error) / beta, abs_error - 0.5 * beta)
-    return _finite_or_penalty(torch.clamp(loss, max=max_value), penalty=max_value)
+    value = torch.square(asset.data.root_lin_vel_b[:, 1])
+    return _finite_or_penalty(value.clamp(max=max_value), penalty=max_value)
 
 
 def orientation_exp_kernel(
@@ -224,6 +103,48 @@ def orientation_exp_kernel(
     asset: Articulation = env.scene[asset_cfg.name]
     roll_pitch_error_sq = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
     return _finite_or_penalty(torch.exp(-kernel_coeff * roll_pitch_error_sq), penalty=0.0)
+
+
+def roll_pitch_deadband_l2(
+    env,
+    roll_deadband_rad: float,
+    pitch_deadband_rad: float,
+    error_scale: float,
+    max_value: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize roll and pitch only after they exceed their allowed deadbands."""
+    gravity = env.scene[asset_cfg.name].data.projected_gravity_b
+    pitch = torch.atan2(gravity[:, 0], torch.linalg.vector_norm(gravity[:, 1:], dim=-1))
+    roll = torch.atan2(gravity[:, 1], -gravity[:, 2])
+    roll_excess = (roll.abs() - roll_deadband_rad).clamp_min(0.0)
+    pitch_excess = (pitch.abs() - pitch_deadband_rad).clamp_min(0.0)
+    value = (torch.square(roll_excess / error_scale) + torch.square(pitch_excess / error_scale))
+    return _finite_or_penalty(value.clamp(max=max_value), penalty=max_value)
+
+
+def wheel_fore_aft_split_l2(
+    env,
+    deadband: float,
+    error_scale: float,
+    max_value: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Penalize fore-aft misalignment between the left and right wheel bodies."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    wheel_pos = asset.data.body_pos_w[:, asset_cfg.body_ids]
+    if wheel_pos.shape[1] != 2:
+        raise ValueError(f"Expected exactly two wheel bodies, got {wheel_pos.shape[1]}")
+
+    # Project the wheel-to-wheel vector onto the robot's horizontal forward axis.
+    delta = wheel_pos[:, 0, :2] - wheel_pos[:, 1, :2]
+    quat = asset.data.root_quat_w
+    yaw_sin = 2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2])
+    yaw_cos = 1.0 - 2.0 * (quat[:, 2].square() + quat[:, 3].square())
+    fore_aft_offset = torch.abs(delta[:, 0] * yaw_cos + delta[:, 1] * yaw_sin)
+    excess = (fore_aft_offset - deadband).clamp_min(0.0)
+    value = torch.square(excess / error_scale)
+    return _finite_or_penalty(value.clamp(max=max_value), penalty=max_value)
 
 
 def straight_pitch_deadband_l2(
@@ -248,80 +169,17 @@ def straight_pitch_deadband_l2(
     return torch.where(active, cost, torch.zeros_like(cost))
 
 
-def pitch_tracking_gaussian(
-    env,
-    sigma: float,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Auxiliary pitch balance reward using projected gravity as a pitch proxy."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    pitch_proxy = asset.data.projected_gravity_b[:, 0]
-    sigma_sq = max(float(sigma) ** 2, 1.0e-6)
-    return _finite_or_penalty(torch.exp(-torch.square(pitch_proxy) / sigma_sq), penalty=0.0)
-
-
-def pitch_rate_l2(
-    env,
-    max_value: float,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Penalize pitch angular velocity."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    value = torch.square(asset.data.root_ang_vel_b[:, 1])
-    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
-
-
-def base_height_range_exp_kernel(
-    env,
-    target_height_range: tuple[float, float],
-    kernel_coeff: float,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Track an episode-sampled base-height target with exp(-k * error^2)."""
-    body_height = _body_height_w(env, asset_cfg)
-    target = _sampled_base_height_target(env, target_height_range)
-    error_sq = torch.square(body_height - target)
-    return _finite_or_penalty(torch.exp(-kernel_coeff * error_sq), penalty=0.0)
-
-
-def base_height_range_tracking_fudan(
-    env,
-    target_height_range: tuple[float, float],
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Fudan-style tight base-height tracking: exp(-error^2 / 0.001)."""
-    body_height = _body_height_w(env, asset_cfg)
-    target = _sampled_base_height_target(env, target_height_range)
-    error = torch.square(body_height - target)
-    return _finite_or_penalty(torch.exp(-error / 0.001), penalty=0.0)
-
-
 def base_height_command_exp_kernel(
     env,
     command_name: str,
     kernel_coeff: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    relative_to_ground: bool = False,
 ) -> torch.Tensor:
-    """Track commanded base height with exp(-k * error^2)."""
+    """Track commanded base height above the flat ground plane."""
     body_height = _body_height_w(env, asset_cfg)
-    if relative_to_ground:
-        body_height = body_height - env.command_manager.get_term(command_name).reference_ground_height()
     command = env.command_manager.get_command(command_name)
     error_sq = torch.square(body_height - command[:, 0])
     return _finite_or_penalty(torch.exp(-kernel_coeff * error_sq), penalty=0.0)
-
-
-def base_height_command_tracking_fudan(
-    env,
-    command_name: str,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Fudan-style tight commanded height tracking: exp(-error^2 / 0.001)."""
-    body_height = _body_height_w(env, asset_cfg)
-    command = env.command_manager.get_command(command_name)
-    error = torch.square(body_height - command[:, 0])
-    return _finite_or_penalty(torch.exp(-error / 0.001), penalty=0.0)
 
 
 def base_height_command_l2(
@@ -330,12 +188,9 @@ def base_height_command_l2(
     error_scale: float,
     max_value: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    relative_to_ground: bool = False,
 ) -> torch.Tensor:
-    """Penalize normalized commanded base-height tracking error."""
+    """Penalize normalized commanded base-height tracking error on flat ground."""
     body_height = _body_height_w(env, asset_cfg)
-    if relative_to_ground:
-        body_height = body_height - env.command_manager.get_term(command_name).reference_ground_height()
     command = env.command_manager.get_command(command_name)
     scaled_error = (body_height - command[:, 0]) / error_scale
     value = torch.square(scaled_error)
@@ -440,43 +295,6 @@ def leg_joint_vel_l2(
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
 
 
-def leg_joint_vel_l2_height_gated(
-    env,
-    command_name: str,
-    gate_sigma: float,
-    max_value: float,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Leg-joint velocity penalty gated by the base-height tracking error.
-
-    .. math::
-        \\text{gate} = \\exp\\left(-\\left(\\frac{h_\\text{base} - h_\\text{cmd}}{\\sigma}\\right)^2\\right)
-
-    Full penalty when the robot settles near the commanded height, relaxed
-    while the height error is large (command transitions, push recovery), so
-    active raising/lowering of the base is still possible.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    body_height = _body_height_w(env, asset_cfg)
-    command = env.command_manager.get_command(command_name)
-    height_error = body_height - command[:, 0]
-    gate = torch.exp(-torch.square(height_error / gate_sigma))
-    joint_vel_sq = torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
-    value = gate * joint_vel_sq
-    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
-
-
-def leg_joint_acc_l2(
-    env,
-    max_value: float,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Penalize squared accelerations of the leg joints only (escalation lever)."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    value = torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
-    return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
-
-
 def action_rate_l2(
     env,
     max_value: float,
@@ -489,6 +307,24 @@ def action_rate_l2(
         action_delta = action_delta[:, start:stop]
     value = torch.sum(torch.square(action_delta), dim=1)
     return _finite_or_penalty(torch.clamp(value, max=max_value), penalty=max_value)
+
+
+def wheel_target_delta_l2(
+    env,
+    action_name: str,
+    delta_scale: float,
+    max_value: float,
+) -> torch.Tensor:
+    """Mean squared final wheel-target change; history is owned/reset by the action term.
+
+    delta_scale is in rad/s per control step, not rad/s².
+    Reading this term does not advance history, so repeated reward reads are safe.
+    """
+    if delta_scale <= 0.0 or max_value <= 0.0:
+        raise ValueError("delta_scale and max_value must be positive.")
+    delta = env.action_manager.get_term(action_name).target_delta
+    value = torch.square(delta / delta_scale).mean(dim=-1)
+    return _finite_or_penalty(value.clamp(max=max_value), penalty=max_value)
 
 
 def action_second_order_l2(

@@ -1,6 +1,7 @@
 """Compatibility with the legacy Isaac Sim MJCF equality importer."""
 
 from dataclasses import fields
+from copy import deepcopy
 import os
 from pathlib import Path
 import tempfile
@@ -11,6 +12,32 @@ import mujoco
 import isaaclab.sim as sim_utils
 from isaaclab.sim.converters import MjcfConverter
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
+
+
+def build_inertial_reference_xml(source):
+    """Keep the MuJoCo reference topology, but honor the selected MJCF inertials.
+
+    uz05.xml uses native frame/site constraints; the Isaac import variant uses
+    legacy body/anchor constraints. Copy only explicit inertials between them.
+    """
+    source = Path(source).resolve()
+    reference_path = source.with_name("uz05.xml")
+    tree = ET.parse(reference_path)
+    root = tree.getroot()
+    bodies = {body.attrib["name"]: body for body in root.iter("body")}
+    for body in ET.parse(source).getroot().iter("body"):
+        inertial = body.find("inertial")
+        if inertial is None:
+            continue
+        reference_body = bodies[body.attrib["name"]]
+        old = reference_body.find("inertial")
+        if old is not None:
+            reference_body.remove(old)
+        reference_body.insert(0, deepcopy(inertial))
+    compiler = root.find("compiler")
+    for attribute in ("meshdir", "texturedir"):
+        compiler.set(attribute, str((reference_path.parent / compiler.get(attribute, ".")).resolve()))
+    return ET.tostring(root, encoding="unicode")
 
 
 class ClosedLoopMjcfConverter(MjcfConverter):
@@ -69,7 +96,7 @@ class ClosedLoopMjcfConverter(MjcfConverter):
         body. Remove the rigid-body schemas instead, and rebase attached joints.
         Geometry and named Xforms remain in place under the chassis rigid body.
         """
-        reference = mujoco.MjModel.from_xml_path(str(source.with_name("uz05.xml")))
+        reference = mujoco.MjModel.from_xml_string(build_inertial_reference_xml(source))
         chassis = bodies["chassis"]
         frames = {name: bodies[name] for name in (
             "legacy_y_forward_model_frame", "left_leg_mount", "right_leg_mount"

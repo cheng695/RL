@@ -4,13 +4,12 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 
 @configclass
-class MyRobotRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RSL-RL PPO configuration for the UZ-05 rough velocity task."""
+class MyRobotFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for the UZ-05 flat velocity task."""
 
     num_steps_per_env = 24
     max_iterations = 3000
     save_interval = 50
-    experiment_name = "uz05_rough"
     run_name = ""
     clip_actions = 1.0
 
@@ -38,27 +37,11 @@ class MyRobotRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
-
-@configclass
-class MyRobotRoughScanPPORunnerCfg(MyRobotRoughPPORunnerCfg):
-    experiment_name = "uz05_rough_scan"
+    experiment_name = "uz05_flat"
 
 
 @configclass
-class MyRobotStepCoursePPORunnerCfg(MyRobotRoughPPORunnerCfg):
-    experiment_name = "uz05_step_course"
-
-
-@configclass
-class MyRobotStepsPPORunnerCfg(MyRobotRoughPPORunnerCfg):
-    experiment_name = "uz05_steps"
-
-
-@configclass
-class MyRobotFlatPPORunnerCfg(MyRobotRoughPPORunnerCfg):
-    """RSL-RL PPO configuration for the UZ-05 flat velocity task."""
-
+class MyRobotGentlePPORunnerCfg(MyRobotFlatPPORunnerCfg):
+    experiment_name = "uz05_gentle"
     def __post_init__(self):
-        super().__post_init__()
-
-        self.experiment_name = "uz05_flat"
+        self.algorithm.learning_rate = 3.e-4

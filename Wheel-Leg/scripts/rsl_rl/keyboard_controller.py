@@ -29,7 +29,11 @@ class KeyboardController:
             self._subscription = None
 
     def _on_keyboard_event(self, event, *args):
-        key = event.input.name
+        # Kit can deliver either a KeyboardInput enum or a string key name.
+        key = event.input if isinstance(event.input, str) else getattr(event.input, "name", None)
+        if not isinstance(key, str):
+            return True
+        key = key.upper()
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             first_press = key not in self.pressed
             self.pressed.add(key)

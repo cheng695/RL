@@ -57,3 +57,24 @@ def illegal_contact_after_steps(
         dim=1,
     )
     return has_contact & (env.episode_length_buf >= min_steps)
+
+
+def non_wheel_ground_contact(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    min_steps: int,
+    wheel_body_names: tuple[str, ...],
+    sensor_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Terminate when any non-wheel robot body contacts the ground after settling."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    non_wheel_body_ids = [
+        index for index, name in enumerate(contact_sensor.body_names) if name not in wheel_body_names
+    ]
+    if not non_wheel_body_ids:
+        raise ValueError("The contact sensor did not find any non-wheel robot bodies.")
+
+    force_history = contact_sensor.data.net_forces_w_history[:, :, non_wheel_body_ids]
+    force_magnitudes = torch.linalg.vector_norm(force_history, dim=-1)
+    has_contact = torch.any(torch.amax(force_magnitudes, dim=1) > threshold, dim=1)
+    return has_contact & (env.episode_length_buf >= min_steps)

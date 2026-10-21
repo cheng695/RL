@@ -24,16 +24,16 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+from isaacsim.core.utils.extensions import enable_extension
+
+enable_extension("isaacsim.asset.importer.mjcf")
+
 import gymnasium as gym
 import torch
-from isaacsim.core.utils.extensions import enable_extension
 
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 import my_robot_lab  # noqa: F401
-
-enable_extension("isaacsim.asset.importer.mjcf")
-
 
 def _term_names(manager) -> list[str]:
     names = getattr(manager, "active_terms", None)
@@ -60,8 +60,6 @@ def main() -> None:
     for name, values in obs.items():
         print(f"[INFO] observation {name}: {tuple(values.shape)}", flush=True)
         assert torch.isfinite(values).all(), f"Non-finite initial observation: {name}"
-    height_term = env.unwrapped.command_manager.get_term("base_height")
-    print(f"[INFO] ground reference z: {height_term.reference_ground_height().tolist()}", flush=True)
     print(f"[INFO] action terms: {_term_names(env.unwrapped.action_manager)}")
     print(f"[INFO] command terms: {_term_names(env.unwrapped.command_manager)}")
     print(f"[INFO] reward terms: {_term_names(env.unwrapped.reward_manager)}")

@@ -114,25 +114,6 @@ exec(compile(height_tree, str(source), "exec"), height_namespace)
 
 
 class HeightCommandTest(unittest.TestCase):
-    def test_local_ground_height_and_missing_ray_fallback(self):
-        cmd = self.make_command()
-        class Scene(dict):
-            env_origins = torch.tensor([[0., 0., 0.], [0., 0., 0.15],
-                                        [0., 0., 0.2], [0., 0., 0.4]])
-        scene = Scene(cmd._env.scene)
-        hits = torch.zeros(4, 3, 3)
-        hits[:, :, 2] = torch.tensor([[0., 0., 0.], [.15, .15, float("inf")],
-                                      [.2, .2, .2], [float("nan"), float("inf"), float("nan")]])
-        scene["ground"] = SimpleNamespace(data=SimpleNamespace(ray_hits_w=hits))
-        scene["robot"].data.body_pos_w[:, 0, 2] = torch.tensor([.31, .46, .51, .71])
-        cmd._env.scene = scene
-        cmd.cfg.ground_sensor_name = "ground"
-        cmd.height_command.fill_(.31)
-        torch.testing.assert_close(cmd.reference_ground_height(), torch.tensor([0., .15, .2, .4]))
-        cmd._update_metrics()
-        torch.testing.assert_close(cmd.metrics["height_actual_cm"], torch.full((4,), 31.))
-        torch.testing.assert_close(cmd.metrics["height_mae_cm"], torch.zeros(4), atol=1e-5, rtol=0)
-
     def make_command(self):
         robot = SimpleNamespace(find_bodies=lambda name: ([0], [name]),
                                 data=SimpleNamespace(body_pos_w=torch.zeros(4, 1, 3)))

@@ -44,18 +44,6 @@ def make_env(count=4):
 
 
 class RewardNumericsTest(unittest.TestCase):
-    def test_height_reward_uses_local_ground(self):
-        env = make_env(count=2)
-        env.scene["robot"].data.body_pos_w = torch.tensor([[[0., 0., .3]], [[0., 0., .5]]])
-        env.command_manager.get_command("base_height")[:, 0] = .3
-        env.command_manager.get_term = lambda name: SimpleNamespace(
-            reference_ground_height=lambda: torch.tensor([0., .2]))
-        cfg = SimpleNamespace(name="robot", body_ids=[0])
-        actual = rewards.base_height_command_exp_kernel(env, "base_height", 200., cfg, True)
-        torch.testing.assert_close(actual, torch.ones(2))
-        actual = rewards.base_height_command_l2(env, "base_height", .05, 9., cfg, True)
-        torch.testing.assert_close(actual, torch.zeros(2))
-
     def test_straight_pitch_transition_gate_and_symmetry(self):
         env = make_env(count=6)
         pitch = torch.tensor([0.15, -0.15, 0.02, 0.15, 0.15, 0.15])

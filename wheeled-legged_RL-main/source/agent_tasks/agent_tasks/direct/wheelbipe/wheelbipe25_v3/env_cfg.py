@@ -406,8 +406,9 @@ class Wheelbipe25v3ReduceSpringFlatEnvCfg(Wheelbipe25v3BaseEnvCfg):
     # True: 轮速控制（policy 输出目标角速度，对目标位置做 damping）
     # False: 力矩控制（policy 输出目标力矩，默认行为）
     use_wheel_vel_control: bool = True
-    wheel_vel_action_scale: float = 10.0  # 轮速模式的 action scale（rad/s per unit）
-    max_wheel_vel: float = 100.0           # 轮速模式最大轮速限制（rad/s）
+    wheel_vel_action_scale: float = 60.0  # policy action 为 [-1, 1] 时，对应目标轮速 [-60, 60] rad/s
+    max_wheel_vel: float = 60.0           # 目标轮速幅值限制（rad/s）
+    max_wheel_acceleration: float = 400.0  # 轮速目标变化率限制（rad/s^2）
 
     ''' action filter '''
     use_action_low_pass_filter: bool = False

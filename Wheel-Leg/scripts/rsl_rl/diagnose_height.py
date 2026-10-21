@@ -19,18 +19,19 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
 
+from isaacsim.core.utils.extensions import enable_extension
+
+enable_extension("isaacsim.asset.importer.mjcf")
+
 import gymnasium as gym
 import numpy as np
 import torch
-from isaacsim.core.utils.extensions import enable_extension
 from isaaclab.utils.math import quat_apply
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from rsl_rl.runners import OnPolicyRunner
 import my_robot_lab
 from my_robot_lab.assets.robots.my_robot_ import LEG_JOINTS, WHEEL_BODY_NAMES, BASE_BODY_NAME
-
-enable_extension("isaacsim.asset.importer.mjcf")
 
 def main():
     task = "MyRobot-Velocity-Flat-Play-v0"

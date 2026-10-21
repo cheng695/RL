@@ -1,14 +1,23 @@
 from pathlib import Path
+import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
-
 from .mjcf import spawn_closed_loop_mjcf
 
-
-ROBOT_MJCF_DIR = Path(__file__).parent / "UZ05_MJCF_real_params"
-ROBOT_MJCF_PATH = ROBOT_MJCF_DIR / "xmls" / "uz05_isaac.xml"
+ROBOT_MASS_VARIANT = os.environ.get("UZ05_MASS_VARIANT", "equalized")
+if ROBOT_MASS_VARIANT not in {"original", "equalized"}:
+    raise ValueError("UZ05_MASS_VARIANT must be 'original' or 'equalized'")
+ROBOT_MJCF_PATH = (
+    Path(__file__).resolve().parent
+    / "UZ05_MJCF_real_params"
+    / "xmls"
+    / ("uz05_isaac_equal_leg_masses.xml" if ROBOT_MASS_VARIANT == "equalized" else "uz05_isaac.xml")
+)
+ROBOT_USD_DIR = (Path(__file__).resolve().parents[5] / "assets"
+                 / ("uz05_equal_leg_masses" if ROBOT_MASS_VARIANT == "equalized" else "uz05"))
+print(f"[INFO] UZ05 mass variant: {ROBOT_MASS_VARIANT}; MJCF: {ROBOT_MJCF_PATH}")
 
 INITIAL_BASE_HEIGHT_RANGE = (0.25, 0.4)
 INITIAL_BASE_HEIGHT = 0.30
@@ -59,10 +68,13 @@ MY_ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.MjcfFileCfg(
         func=spawn_closed_loop_mjcf,
         asset_path=str(ROBOT_MJCF_PATH),
-        force_usd_conversion=True,  # Converter also reads inertials from uz05.xml.
+        usd_dir=str(ROBOT_USD_DIR),
+        usd_file_name="uz05.usd",
+        force_usd_conversion=True,
+        make_instanceable=True,
+        import_inertia_tensor=True,
         import_sites=True,
         fix_base=False,
-        make_instanceable=False,
         self_collision=False,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -100,7 +112,7 @@ MY_ROBOT_CFG = ArticulationCfg(
             effort_limit_sim=4.5,
             velocity_limit_sim=60.0,
             stiffness=0.0,
-            damping=0.2,
+            damping=5.0,
             armature=0.0001,
         ),
         "passive_joints": ImplicitActuatorCfg(
@@ -114,4 +126,4 @@ MY_ROBOT_CFG = ArticulationCfg(
     },
 )
 
-"""Configuration for the UZ-05 wheel-legged robot imported from MJCF."""
+"""Configuration for the UZ-05 wheel-legged robot loaded from MJCF."""
